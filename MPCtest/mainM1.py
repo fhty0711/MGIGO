@@ -1,11 +1,15 @@
+import os
+import sys
 import jax
 import jax.numpy as jnp
 from jax import random, vmap, jit
 import time 
+project_root=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
 
 # 导入已经根据 Algorithm 3 严格修改后的求解器
 # 假设新求解器保存在 gmm_igo/MPCsolverM2.py 中
-from gmm_igo.MPCsolverM22 import mmog_igo_optimizer
+from gmm_igo.MPCsolverM2 import mmog_igo_optimizer_mpc
 
 # ======================================================================
 # 1. 目标函数 (对齐 Algorithm 3 的最小化倾向)
@@ -72,7 +76,7 @@ def run_loop_test():
         start_time = time.time()
         
         # 调用严格对齐算法的求解器
-        final_mu, final_L, final_pi = mmog_igo_optimizer(
+        final_mu, final_L, final_pi = mmog_igo_optimizer_mpc(
             key=subkey, 
             T=T_RUN, 
             dt=DELTA_T, 

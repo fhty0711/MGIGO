@@ -31,7 +31,7 @@ def init_mpc_params(key, M, K, D_MAX):
     
     # 初始化 Cholesky 因子 L_inv (精度矩阵的平方根): (M, K, D_MAX, D_MAX)
     # 使用单位阵乘以根号 2，对齐 mainST.py 的逻辑
-    L_template = jnp.eye(D_MAX) * jnp.sqrt(2.0)
+    L_template = jnp.eye(D_MAX) * jnp.sqrt(3.0)
     initial_L_inv = jnp.tile(L_template, (M, K, 1, 1))
     
     # 初始化混合权重对数项 v: (M, K-1)
@@ -45,16 +45,16 @@ def init_mpc_params(key, M, K, D_MAX):
 def run_example():
     # --- 参数配置 ---
     SEED = 42
-    T_RUN = 10000        # 迭代轮数
-    DELTA_T = 0.1     # 步长
-    M_BLOCKS = 3       # 块数量 (N)
+    T_RUN = 1000        # 迭代轮数
+    DELTA_T = 0.2     # 步长
+    M_BLOCKS = 8       # 块数量 (N)
     K_COMP = 10        # 每个块的分量数 (K)
-    DIMS_TUPLE = (4, 4, 4) # 每个块的实际有效维度
+    DIMS_TUPLE = (8,8,8,8,8,8,8,8) # 每个块的实际有效维度
     D_MAX = max(DIMS_TUPLE)
     
-    B_SAMPLES = 60    # 样本数 (B)
-    B_0_ELITE = 25     # 精英样本数 (B0)
-    T_0_RESTART = 1000  # 重置周期 (T0)
+    B_SAMPLES = 100    # 样本数 (B)
+    B_0_ELITE = 45     # 精英样本数 (B0)
+    T_0_RESTART = 250  # 重置周期 (T0)
     
     key = random.PRNGKey(SEED)
     key_init, key_solve = random.split(key)
@@ -108,7 +108,7 @@ def run_example():
         mu_best = final_mu[m, idx, :DIMS_TUPLE[m]]
         print(f"块 {m} [最佳分量 {idx}]:")
         print(f"  权重 pi: {final_pi[m, idx]:.4f}")
-        print(f"  均值 mu (前4维): {mu_best[:4]}")
+        print(f"  均值 mu (前4维): {mu_best[:20]}")
 
 if __name__ == "__main__":
     run_example()

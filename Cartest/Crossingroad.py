@@ -13,7 +13,7 @@ from matplotlib import animation
 
 # 假设 MPCsolverM.py 位于当前目录下
 # 请根据您的实际路径修改导入：
-from gmm_igo.MPCsolverM import mmog_igo_optimizer_mpc 
+from gmm_igo.MPCsolverM22 import mmog_igo_optimizer_mpc 
 
 # ======================================================================
 # I. 配置参数 (参数保持不变，与 Crossingroad.py 一致)
@@ -26,7 +26,7 @@ M_MOG = 3
 K_COMP = 8        
 B_SAMPLES = 60    
 B_0_ELITE = 25    
-T_0_RESTART = 80  
+T_0_RESTART = 100  
 
 PRED_STEPS = 6    
 CONTROL_DIM = 2   
@@ -36,7 +36,7 @@ DIMS_TUPLE = (D_I, D_I, D_I)
 D_MAX = max(DIMS_TUPLE)
 
 T_IGO_ITER = 400  
-T_MPC_RUNS = 80   
+T_MPC_RUNS = 50   
 
 # 成本函数权重和常量
 W_TARGET = 10.0
@@ -390,16 +390,6 @@ if __name__ == '__main__':
             current_x, current_y = traj[t, 0], traj[t, 1]
             car_markers[i].set_data([current_x], [current_y])
             
-            # *** 关键：更新车辆方向 (使用初始状态中的 theta) ***
-            # 这里的theta (航向角)需要从 initial_states 中获取，但是 initial_states 
-            # 在循环中被更新为 new_initial_states (包含最新的 theta).
-            # 我们需要保存所有的状态 (x, y, theta, v) 而不仅仅是 (x, y).
-            
-            # 由于原代码只保存了 (x, y) 坐标，我们无法准确显示方向。
-            # 为了满足 "不修改程序参数" 的要求，我们只能根据 (x, y) 的变化趋势粗略估计，
-            # 或者像现在这样，只显示位置。
-
-            # 为简化并保持与原代码的精神一致 (只保存了xy)，我们只更新位置。
             
         ax.set_title(f'3-Car Intersection Coordination - Time Step {t+1} / {num_frames} (T={t * DYN_DT:.2f}s)')
         

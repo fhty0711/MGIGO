@@ -1,9 +1,15 @@
+import sys
+import os
 import jax
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
+from matplotlib.patches import Circle, Arrow
 import time
+
+project_root=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
+
 from gmm_igo.MPCsolver import igo_mog_optimizer
 
 # ==============================================================================

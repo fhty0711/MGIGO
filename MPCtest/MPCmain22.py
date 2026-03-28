@@ -21,7 +21,7 @@ CONFIG = {
     'opt_steps': 100,     
     'warmup_steps': 1000,
     'max_v': 2.8,         
-    'max_w': 2.0,         
+    'max_w': 1.0,         
     'obs_radius': 1.6,    
     'safe_margin': 0.2,   
 }
@@ -170,7 +170,7 @@ def run_heterogeneous_functional_mpc():
 
         key, subkey = jax.random.split(key)
         mu_k_batch, L_inv_k_batch, pi_k_batch = parallel_igo_solver(
-            jax.random.split(subkey, N_TASKS), CONFIG['opt_steps'], 0.1, K, 
+            jax.random.split(subkey, N_TASKS), CONFIG['opt_steps'], 0.15, K, 
             CONFIG['pop_size'], CONFIG['elite_size'], mpc_cost_fn, 
             mu_k_batch, L_inv_k_batch, pi_k_batch, batch_context
         )
@@ -196,9 +196,9 @@ def run_heterogeneous_functional_mpc():
                 ax.add_patch(Circle(op, CONFIG['obs_radius'], color='gray', alpha=0.3))
             for i in range(N_TASKS):
                 traj_np = get_trajectory_np(robot_state, mu_k_batch[i, jnp.argmax(pi_k_batch[i])])
-                ax.plot(traj_np[:,0], traj_np[:,1], lw=2.5 if i==best_idx else 0.8)
+                ax.plot(traj_np[:,0], traj_np[:,1], lw=3.0 if i==best_idx else 0.8)
             ax.plot(target_final[0], target_final[1], 'g*', ms=15)
-            plt.pause(0.01)
+            plt.pause(0.02)
 
         mu_k_batch = shift_solution_batch(mu_k_batch)
 
