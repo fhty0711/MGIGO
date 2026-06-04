@@ -7,9 +7,26 @@ import functools
 # I. 核心辅助函数 (支持异构维度掩码)
 # ======================================================================
 
+MIN_EIG = 1e-2
+MAX_EIG = 1e3
+def _safe_spd_projection(S):
+    """✅ FIX 3: 保证 SPD"""
+    eigvals, eigvecs = jnp.linalg.eigh(S)
+    eigvals = jnp.maximum(eigvals, MIN_EIG)
+    eigvals = jnp.minimum(eigvals, MAX_EIG)
+    return eigvecs @ (eigvals[:, None] * eigvecs.T)
+
 @jit
 def _logsumexp(a, axis=None):
     return jnp.logaddexp.reduce(a, axis=axis)
+
+@jit
+def _project_spd(mat, eps=1e-6, max_eig=1e6):
+    """Symmetrize and clip eigenvalues to keep matrix SPD."""
+    sym = 0.5 * (mat + mat.T)
+    eigvals, eigvecs = jnp.linalg.eigh(sym)
+    eigvals = jnp.clip(eigvals, eps, max_eig)
+    return (eigvecs * eigvals) @ eigvecs.T
 
 @jit
 def _gaussian_log_pdf_l_masked(xi, mu, S, D_m):
@@ -35,6 +52,7 @@ def _update_component_core(
 ):
     D_max = mu_k.shape[0]
     
+    S_k = _project_spd(S_k)
     # 1. 计算当前分量、基准分量和整体 MoG 的对数 PDF
     log_pdf_k = vmap(lambda x: _gaussian_log_pdf_l_masked(x, mu_k, S_k, D_m))(samples)
     log_pdf_base = vmap(lambda x: _gaussian_log_pdf_l_masked(x, mu_base, S_base, D_m))(samples)
@@ -58,7 +76,9 @@ def _update_component_core(
     
     sum_S_grad = jnp.sum((elite_weights * a_i)[:, None, None] * vmap(s_grad_fn)(diff), axis=0)
     S_new = S_k - delta_t * sum_S_grad
-    S_new = (S_new + S_new.T) / 2.0 + jnp.eye(D_max) * 1e-6
+    S_new = (S_new + S_new.T) / 2.0 
+
+    S_new = _safe_spd_projection(S_new)
 
     # 4. 均值 mu 更新 (Line 30) - 使用更新后的 S_new
     grad_mu_terms = (S_k @ diff.T).T

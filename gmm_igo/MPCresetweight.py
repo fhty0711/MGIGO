@@ -9,6 +9,15 @@ from typing import Callable, Tuple, Any
 # I. 核心辅助函数
 # ======================================================================
 
+MIN_EIG = 1e-2
+MAX_EIG = 1e3
+def _safe_spd_projection(S):
+    """✅ FIX 3: 保证 SPD"""
+    eigvals, eigvecs = jnp.linalg.eigh(S)
+    eigvals = jnp.maximum(eigvals, MIN_EIG)
+    eigvals = jnp.minimum(eigvals, MAX_EIG)
+    return eigvecs @ (eigvals[:, None] * eigvecs.T)
+
 @jit
 def _logsumexp(a, axis=None):
     return jnp.logaddexp.reduce(a, axis=axis)
@@ -68,7 +77,8 @@ def _update_step_k_l_single_component(
     sum_S = jnp.sum((elite_weights * a_i)[:, None, None] * S_grads, axis=0)
 
     S_new = S_k_t - delta_t * sum_S
-    S_new = (S_new + S_new.T) / 2.0 + jnp.eye(D_max) * 1e-6
+
+    S_new = _safe_spd_projection(S_new)
     L_inv_new = jnp.linalg.cholesky(S_new)
 
     mu_new = mu_k_t + delta_t * jnp.linalg.solve(S_new , sum_mu)

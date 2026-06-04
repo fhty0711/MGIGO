@@ -9,6 +9,15 @@ import functools
 # I. 核心辅助函数 (信息矩阵 S_k 范式)
 # ----------------------------------------------------------------------
 
+MIN_EIG = 1e-2
+MAX_EIG = 1e3
+def _safe_spd_projection(S):
+    """✅ FIX 3: 保证 SPD"""
+    eigvals, eigvecs = jnp.linalg.eigh(S)
+    eigvals = jnp.maximum(eigvals, MIN_EIG)
+    eigvals = jnp.minimum(eigvals, MAX_EIG)
+    return eigvecs @ (eigvals[:, None] * eigvecs.T)
+
 @jax.jit
 def _logsumexp(a, axis=None):
     return jnp.logaddexp.reduce(a, axis=axis)
@@ -59,13 +68,16 @@ def _get_elite_weights(samples, fitness_fn, B, B_0, context):
 
 LOG_CLIP_VALUE = 80.0 
 
+@jax.jit
 def _update_step_k_l_single_component(
     k_idx, mu_k_t, L_inv_k_t, samples, elite_weights, 
     pi_k_all, mu_k_all, L_inv_k_all, delta_t,
     mu_K_t, L_inv_K_t 
 ):
+    # 1. 计算当前步的精度矩阵 S_k_t = L_inv @ L_inv.T
     S_k_t = L_inv_k_t @ L_inv_k_t.T 
     
+    # 2. 计算各组件对样本的“责任频率” (a_{i,b})
     vmap_log_pdf_k = vmap(_gaussian_log_pdf_l, in_axes=(0, None, None))
     log_norm_pdf_k = vmap_log_pdf_k(samples, mu_k_t, L_inv_k_t) 
     log_norm_pdf_K = vmap_log_pdf_k(samples, mu_K_t, L_inv_K_t)
@@ -74,39 +86,44 @@ def _update_step_k_l_single_component(
         samples, mu_k_all, L_inv_k_all, pi_k_all
     )
 
-    log_a_i = jnp.clip(log_norm_pdf_k - log_mog_xi, a_max=LOG_CLIP_VALUE)
-    log_b_i = jnp.clip(log_norm_pdf_K - log_mog_xi, a_max=LOG_CLIP_VALUE)
+    # a_i 对应论文中的 a_{i,b}
+    a_i = jnp.exp(jnp.clip(log_norm_pdf_k - log_mog_xi, a_max=LOG_CLIP_VALUE))
+    b_i = jnp.exp(jnp.clip(log_norm_pdf_K - log_mog_xi, a_max=LOG_CLIP_VALUE))
+    scaled_a_i = a_i * elite_weights # 结合了排名权重 w_hat
     
-    a_i = jnp.exp(log_a_i)
-    b_i = jnp.exp(log_b_i)
-    scaled_a_i = a_i * elite_weights
-    
+    # 3. 精度矩阵 S 的更新 (严格对应论文公式 20)
+    # 论文公式: S_new = S - alpha * sum( w * a * (S * diff * diff.T * S - S) )
     diff = samples - mu_k_t
-    diff_outer = vmap(lambda x: jnp.outer(x, x))(diff)
+    # 计算 S * (z-mu)(z-mu).T * S
+    # 数学等价于: (S * diff) * (S * diff).T
+    S_diff = (S_k_t @ diff.T).T 
+    S_diff_outer = vmap(lambda x: jnp.outer(x, x))(S_diff)
     
-    #Sigma_k_t = jnp.linalg.inv(S_k_t) 
-    S_update_term_i = S_k_t @ diff_outer @ S_k_t - S_k_t[None, :, :]
+    # 括号内的项: [S(z-mu)(z-mu)^T S - S]
+    S_update_term_i = S_diff_outer - S_k_t[None, :, :]
     
     sum_S_update = jnp.sum(scaled_a_i[:, None, None] * S_update_term_i, axis=0)
-    
     S_k_t_plus_1_prop = S_k_t - delta_t * sum_S_update 
     
+    # 4. 保持对称性与正定性 (论文中的 epsilon I 扰动)
     S_k_t_plus_1_prop = (S_k_t_plus_1_prop + S_k_t_plus_1_prop.T) / 2
-    D_dim = S_k_t_plus_1_prop.shape[0]
-    S_k_t_plus_1_prop = S_k_t_plus_1_prop + jnp.eye(D_dim) * 1e-6 
-    
-    L_inv_k_t_plus_1 = jnp.linalg.cholesky(S_k_t_plus_1_prop)
-   # S_k_t_plus_1 = L_inv_k_t_plus_1 @ L_inv_k_t_plus_1.T
+    # D_dim = S_k_t_plus_1_prop.shape[0]
+    # S_k_t_plus_1_prop = S_k_t_plus_1_prop  
 
-    weighted_diff = scaled_a_i[None, :] * diff.T 
-    S_t_weighted_diff = S_k_t @ weighted_diff
-    sum_term_vector = jnp.sum(S_t_weighted_diff, axis=1) 
+    safe_S_k_t_plus_1 = _safe_spd_projection(S_k_t_plus_1_prop)
     
-    sum_term_vector_for_update=jnp.linalg.solve(L_inv_k_t_plus_1, sum_term_vector)
-    mu_update_term =jnp.linalg.solve(L_inv_k_t_plus_1.T, sum_term_vector_for_update)
-   # mu_update_term = jnp.linalg.solve(S_k_t_plus_1, sum_term_vector)
+    # 获取新的 Cholesky 分解用于下一步
+    L_inv_k_t_plus_1 = jnp.linalg.cholesky(safe_S_k_t_plus_1)
+
+    # 5. 均值 mu 的更新 (严格对应论文公式 21)
+    # 论文公式: mu_new = mu + alpha * (S_new)^{-1} * sum( w * a * S * (z-mu) )
+    weighted_diff_sum = jnp.sum(scaled_a_i[:, None] * S_diff, axis=0)
+    
+    # 使用更新后的 S_{t+1} 解线性方程组，等价于乘以 (S_{t+1})^{-1}
+    mu_update_term = jnp.linalg.solve(S_k_t_plus_1_prop, weighted_diff_sum)
     mu_k_t_plus_1 = mu_k_t + delta_t * mu_update_term
 
+    # 6. 混合权重增量 (对应论文公式 22)
     v_update_sum = jnp.sum(elite_weights * (a_i - b_i))
     
     return mu_k_t_plus_1, L_inv_k_t_plus_1, v_update_sum

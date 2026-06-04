@@ -64,7 +64,7 @@ def mpc_cost_fn(flat_actions, context):
     
     dist_to_target = jnp.linalg.norm(trajectory - target, axis=1)
     cost_track = jnp.sum(dist_to_target) * 2.0
-    cost_final = jnp.linalg.norm(trajectory[-1] - target) * 15.0 # 强化终点吸引
+    cost_final = jnp.linalg.norm(trajectory[-1] - target) * 15.0 
     
     obs_pos = context['obs_pos']
     safe_dist = context['safe_distance']

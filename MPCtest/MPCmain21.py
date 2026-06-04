@@ -40,9 +40,6 @@ CONFIG = {
 
 TOTAL_DIM = CONFIG['horizon'] * CONFIG['dim']
 
-# ==============================================================================
-# 2. Unicycle 动力学与代价函数 (保持原样，不破坏物理平衡)
-# ==============================================================================
 
 @jax.jit
 def mpc_cost_fn(flat_actions, context):
@@ -81,9 +78,7 @@ def mpc_cost_fn(flat_actions, context):
     
     return cost_track + cost_final + cost_obstacle + cost_smooth + cost_v
 
-# ==============================================================================
-# 3. 改进的决策辅助函数
-# ==============================================================================
+
 
 def shift_solution_with_diversity(mu_k, K, horizon, dim):
     """在解推进时，为不同分量注入不同的末端探测倾向"""

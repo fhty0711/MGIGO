@@ -1,6 +1,6 @@
 import jax
 from jax import vmap
-from gmm_igo.MPCsolverM2 import mmog_igo_optimizer_mpc
+from gmm_igo.MPCsolverM22 import mmog_igo_optimizer_mpc
 
 # 这是一个纯净的包装器，不带 jit，由底层 mmog_igo_optimizer_mpc 自带的 jit 保证速度
 def parallel_mmog_igo_mpc(
