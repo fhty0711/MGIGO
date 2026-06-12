@@ -68,10 +68,10 @@ $$
 
 ### Key Property
 
-The selection weights $\widehat{W_{\Theta^{t}}^{f}(z_b)^{j}}$ are identical for all blocks $j$:
+The selection weights $\widehat{W}_{\Theta^{t}}^{f}(z_b)^{(j)}$ are identical for all blocks $j$:
 
 $$
-\widehat{W_{\Theta^{t}}^{f}(z_b)^{1}} = \widehat{W_{\Theta^{t}}^{f}(z_b)^{2}} = \cdots = \widehat{W_{\Theta^{t}}^{f}(z_b)^{N}}
+\widehat{W}_{\Theta^{t}}^{f}(z_b)^{(1)} = \widehat{W}_{\Theta^{t}}^{f}(z_b)^{(2)} = \cdots = \widehat{W}_{\Theta^{t}}^{f}(z_b)^{(N)}
 $$
 
 Each block updates independently using the same global weights $\hat{w}_b$ from ranking $f(z_1,\dots,z_N)$.
