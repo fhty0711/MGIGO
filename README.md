@@ -68,32 +68,43 @@ $$(\pi_{j,1},\dots,\pi_{j,K}) = \left(\frac{1}{K},\dots,\frac{1}{K}\right)$$
 
 ## 3. Multi-Agent Games (Nash Equilibrium)
 
-For $N$ agents with individual costs $f_i(z_i,z_{-i})$, define marginal expected cost:
+For N agents with individual costs f_i(z_i, z_{-i}), define marginal expected cost:
 
+m_i(z_i; theta_{-i}) := E_{z_{-i} ~ p_{theta_{-i}}}[f_i(z_i, z_{-i})]
 
 A randomized Nash equilibrium satisfies:
 
-$$\mathbb{E}_{z_i \sim p_{\theta_i^*}}[m_i(z_i; \theta_{-i}^*)] \leq \mathbb{E}_{z_i \sim p_{\theta_i}}[m_i(z_i; \theta_{-i}^*)] \quad \forall p_{\theta_i} \in \mathcal{P}(\mathbb{Z}_i), \quad i=1,\dots,N$$
+E_{z_i ~ p_{theta_i^*}}[m_i(z_i; theta_{-i}^*)] <= E_{z_i ~ p_{theta_i}}[m_i(z_i; theta_{-i}^*)], for all p_{theta_i}
 
 The coupled IGO flow for each agent:
 
-$$\frac{d\theta_i^t}{dt} = \tilde\nabla_{\theta_i} \left.\int W_{\Theta^t}^{m_i}(z) \log p(z_i;\theta_i)\right|_{\theta_i=\theta_i^t} p_{\Theta^t}(z) dz$$
+d theta_i^t / dt = tilde_nabla_{theta_i} int W_{Theta^t}^{m_i}(z) log p(z_i; theta_i) p_{Theta^t}(z) dz
 
-Each agent uses its own weights $\hat{w}_{i,b}$ from Monte Carlo estimation of $m_i$, with parallel updates across agents.
+Each agent uses its own weights w_hat_{i,b} from Monte Carlo estimation of m_i, with parallel updates across agents.
+
+### Algorithm Structure
+
+For each agent i:
+- Sample z_b from its own distribution p_{theta_i}
+- Sample opponent strategies c_m from opponent distributions p_{theta_{-i}}
+- Estimate marginal cost: f_hat_i(z_b^{(i)}) = (1/M) sum_{m=1}^M f_i(z_b^{(i)}, c_m^{(-i)})
+- Rank samples by f_hat_i and assign weights w_hat_{i,b}
+- Update pi_{i,k}, mu_{i,k}, S_{i,k} using blockwise MGIGO updates
 
 ---
 
 ## 4. Recycling Old Samples
 
-Importance weight for reusing sample from iteration $t-1$:
+Importance weight for reusing sample from iteration t-1:
 
-$$\omega_b = \frac{p(z_b^{t-1}; \Lambda^{t})}{p(z_b^{t-1}; \Lambda^{t-1})} = \frac{\sum_{i=1}^K \pi_i^{t} \mathcal{N}(z_b^{t-1}; \mu_i^{t}, (S_i^{t})^{-1})}{\sum_{i=1}^K \pi_i^{t-1} \mathcal{N}(z_b^{t-1}; \mu_i^{t-1}, (S_i^{t-1})^{-1})}$$
+omega_b = p(z_b^{t-1}; Lambda^t) / p(z_b^{t-1}; Lambda^{t-1})
+       = sum_{i=1}^K pi_i^t N(z_b^{t-1}; mu_i^t, (S_i^t)^{-1}) / sum_{i=1}^K pi_i^{t-1} N(z_b^{t-1}; mu_i^{t-1}, (S_i^{t-1})^{-1})
 
 Quantile estimator for combined samples:
 
-$$\widehat{q}_{\Lambda^{t}}^{f}(z_{(k)}) = \frac{\sum_{j=1}^{k-1} \omega_{(j)}}{\sum_{j=1}^{N} \omega_{(j)}}$$
+q_hat_{Lambda^t}^f(z_{(k)}) = (sum_{j=1}^{k-1} omega_{(j)}) / (sum_{j=1}^{N} omega_{(j)})
 
-Update equations use effective weights $\omega_b \cdot \widehat{W}_b$ for each sample.
+Update equations use effective weights omega_b * W_hat_b for each sample.
 
 ---
 
