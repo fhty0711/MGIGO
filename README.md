@@ -73,7 +73,7 @@ For $N$ agents with individual costs $f_i(z_i,z_{-i})$, define marginal expected
 
 A randomized Nash equilibrium satisfies:
 
-$$\mathbb{E}_{z_i \sim p_{\theta_i^*}}[m_i(z_i; \theta_{-i}^*)] \leq \mathbb{E}_{z_i \sim p_{\theta_i}}[m_i(z_i; \theta_{-i}^*)] \quad \forall p_{\theta_i} \in \mathcal{P}(\mathbb{Z}_i), \quad i=1,\dots,N$$.
+$$\mathbb{E}_{z_i \sim p_{\theta_i^*}}[m_i(z_i; \theta_{-i}^*)] \leq \mathbb{E}_{z_i \sim p_{\theta_i}}[m_i(z_i; \theta_{-i}^*)] \quad \forall p_{\theta_i} \in \mathcal{P}(\mathbb{Z}_i), \quad i=1,\dots,N$$
 
 The coupled IGO flow for each agent:
 
