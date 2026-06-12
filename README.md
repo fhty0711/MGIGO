@@ -1,5 +1,5 @@
-<meta charset="UTF-8">
-<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+
+
 This is a trajectory planning project using receding horizon style(or MPC, if you are used to call it) using global optimization method based on IGO and GMM as searching distribution. 
 Written by the first author of MGIGO, it's easy to figure out the algorithm given by the article. 
 
