@@ -97,7 +97,7 @@ $$
 A randomized Nash equilibrium satisfies:
 
 $$
-\mathbb{E}_{z_i \sim p_{\theta_i^*}}[m_i(z_i; \theta_{-i}^*)] \leq \mathbb{E}_{z_i \sim p_{\theta_i}}[m_i(z_i; \theta_{-i}^*)], \quad \forall p_{\theta_i}
+\mathbf{E}_{z_i \sim p_{\theta_i^*}}[m_i(z_i; \theta_{-i}^*)] \leq \mathbb{E}_{z_i \sim p_{\theta_i}}[m_i(z_i; \theta_{-i}^*)], \quad \forall p_{\theta_i}
 $$
 
 The coupled IGO flow for each agent:
