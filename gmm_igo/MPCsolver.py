@@ -9,7 +9,7 @@ import functools
 # I. 核心辅助函数 (信息矩阵 S_k 范式)
 # ----------------------------------------------------------------------
 
-MIN_EIG = 1e-2
+MIN_EIG = 1e-3
 MAX_EIG = 1e3
 def _safe_spd_projection(S):
     """✅ FIX 3: 保证 SPD"""
@@ -66,7 +66,7 @@ def _get_elite_weights(samples, fitness_fn, B, B_0, context):
 # II. K 个分量的并行更新逻辑
 # ----------------------------------------------------------------------
 
-LOG_CLIP_VALUE = 80.0 
+LOG_CLIP_VALUE = 20.0 
 
 @jax.jit
 def _update_step_k_l_single_component(

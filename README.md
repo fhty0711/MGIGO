@@ -1,139 +1,435 @@
+# GMM-IGO: General-Purpose Optimization Solver Framework
 
-
-This is a trajectory planning project using receding horizon style(or MPC, if you are used to call it) using global optimization method based on IGO and GMM as searching distribution. 
-Written by the first author of MGIGO, it's easy to figure out the algorithm given by the article. 
-
-These codes are just for trials as numerical examples that try to verify whether a cost function is correct. 
-Also, the codes included in MGIGO are solvers equipped with different types.
-
-If you want to figure out the algorithm in the article MGIGO you can just use these codes. For practicle engineering uses, see https://github.com/qlp71/IOC_AGV.git
-
-Here are formula for all algorithms:
-# MGIGO: Mixture Gaussian Information Geometry Optimization
-
-A unified information-geometric optimization framework for black-box optimization, trajectory planning, and multi-agent games.
-
-## 1. Original MGIGO
-
-The algorithm optimizes over $\mathbb{Z}$ using a $K$-component Gaussian mixture search distribution:
-
-$$
-p_{\Theta}(z) = \sum_{i=1}^{K} \pi_i \mathcal{N}(z; \mu_i, S_i^{-1})
-$$
-
-### Update Equations
-
-**Component weight for sample $b$ ($i = 1,\dots,K$, $b = 1,\dots,B$):**
-
-$$
-a_{i,b}^{t} = \frac{\mathcal{N}(z_b;\mu_i^t,(S_i^t)^{-1})}{\sum_{k=1}^{K} \pi_k^t \mathcal{N}(z_b;\mu_k^t,(S_k^t)^{-1})}
-$$
-
-**Selection weights ($B_0 = \lceil a B \rceil$):**
-
-$$
-\hat{w}_b = \begin{cases}
-\frac{1}{B}, & \text{if } \mathrm{rank}(f(z_b)) \le B_0 \\
-0, & \text{otherwise}
-\end{cases}
-$$
-
-**Mixture weights ($i = 1,\dots,K-1$):**
-
-$$
-\log\frac{\pi_{i}^{t+1}}{\pi_{K}^{t+1}} = \log\frac{\pi_{i}^{t}}{\pi_{K}^{t}} + \alpha_t \sum_{b=1}^{B} \hat{w}_b (a_{i,b}^t - a_{K,b}^t)
-$$
-
-**Covariance ($i = 1,\dots,K$):**
-
-$$
-S_{i}^{t+1} = S_{i}^t - \alpha_t \sum_{b=1}^{B} \hat{w}_b a_{i,b}^t \left(S_{i}^t (z_b - \mu_i^t)(z_b - \mu_i^t)^\top S_{i}^t - S_{i}^t\right)
-$$
-
-**Mean ($i = 1,\dots,K$):**
-
-$$
-\mu_{i}^{t+1} = \mu_{i}^t + \alpha_t (S_{i}^{t+1})^{-1} \sum_{b=1}^{B} \hat{w}_b a_{i,b}^t S_{i}^t (z_b - \mu_i^t)
-$$
+A black-box global optimization solver based on **IGO (Information-Geometric
+Optimization)** + **GMM (Gaussian Mixture Model)**. Transforms arbitrary
+constrained optimization problems into scalar cost functions, searching for
+global optima in continuous, discrete, or mixed decision spaces.
 
 ---
 
-## 2. Blockwise MGIGO
+## Table of Contents
 
-For product search space $\mathbb{Z} = \mathbb{Z}_1 \times \cdots \times \mathbb{Z}_N$:
-
-$$
-p_\Theta(z) = \prod_{j=1}^N p_{\theta_j}(z^{(j)}), \qquad p_{\theta_j}(z^{(j)}) = \sum_{k=1}^K \pi_{j,k} \mathcal{N}(z^{(j)}; \mu_{j,k}, S_{j,k}^{-1})
-$$
-
-### Key Property
-
-The selection weights $\widehat{W}_{\Theta^{t}}^{f}(z_b)^{(j)}$ are identical for all blocks $j$:
-
-$$
-\widehat{W}_{\Theta^{t}}^{f}(z_b)^{(1)} = \widehat{W}_{\Theta^{t}}^{f}(z_b)^{(2)} = \cdots = \widehat{W}_{\Theta^{t}}^{f}(z_b)^{(N)}
-$$
-
-Each block updates independently using the same global weights $\hat{w}_b$ from ranking $f(z_1,\dots,z_N)$.
-
-### Reset Step
-
-To prevent premature convergence, reset mixture weights every $T_0$ iterations:
-
-$$
-(\pi_{j,1},\dots,\pi_{j,K}) = \left(\frac{1}{K},\dots,\frac{1}{K}\right)
-$$
+1. [What It Does](#1-what-it-does)
+2. [Core Solvers](#2-core-solvers)
+3. [Constraint Transformation Engine (Constran)](#3-constraint-transformation-engine)
+4. [Supported Constraint Types](#4-supported-constraint-types)
+5. [Priority Nesting System](#5-priority-nesting-system)
+6. [Quick Start](#6-quick-start)
+7. [Project Structure](#7-project-structure)
+8. [References](#8-references)
 
 ---
 
-## 3. Multi-Agent Games (Nash Equilibrium)
+## 1. What It Does
 
-For $N$ agents with individual costs $f_i(z_i,z_{-i})$, define marginal expected cost:
+### In One Sentence
 
-$$
-m_i(z_i; \theta_{-i}) := \mathbb{E}_{z_{-i} \sim p_{\theta_{-i}}}[f_i(z_i, z_{-i})]
-$$
+**You write the objective and constraints in JAX. The solver handles the rest.**
 
-A randomized Nash equilibrium satisfies:
+### Use Cases
 
+| Scenario | Solver | Constraint Engine |
+|----------|--------|-------------------|
+| Unconstrained continuous optimization | MPCsolverM22, blockwise_mgigo | `build_unconstrained()` |
+| Deterministic constraints (g(x) ≤ 0) | MPCsolverM22 | `Deterministic` |
+| Chance constraints (P(safe) ≥ 95%) | MPCsolverM22 | `Chance` |
+| Robust constraints (∀ξ ∈ Ξ) | MPCsolverM22 | `Robust` |
+| Distributionally robust (worst distribution) | MPCsolverM22 | `DRO` |
+| **Mixed constraints + priorities** | MPCsolverM22 | `build()` |
+| Receding-horizon MPC (obstacle/tracking) | MPCsolverM22, MPCsolver | `build()` |
+| TSP / permutation optimization | TSP | — |
+| Multi-agent Nash equilibrium | MPC_G, MPC_G_MS | `build_multi_agent()` |
+| Block-structured optimization | blockwise_mgigo | `build()` |
 
-$E_{z_i \sim p_i^*}[m_i(z_i; \theta_{-i}^*)] \leq E_{z_i \sim p_i}[m_i(z_i; \theta_{-i}^*)], \quad \forall p_i$
+### Key Features
 
-
-The coupled IGO flow for each agent:
-
-$$
-\frac{d\theta_i^t}{dt} = \tilde\nabla_{\theta_i} \left.\int W_{\Theta^t}^{m_i}(z) \log p(z_i;\theta_i)\right|_{\theta_i=\theta_i^t} p_{\Theta^t}(z) dz
-$$
-
-Each agent uses its own weights $\hat{w}_{i,b}$ from Monte Carlo estimation of $m_i$, with parallel updates across agents.
-
-### Algorithm Structure
-
-For each agent $i$:
-- Sample $z_b$ from its own distribution $p_{\theta_i}$
-- Sample opponent strategies $c_m$ from opponent distributions $p_{\theta_{-i}}$
-- Estimate marginal cost: $\hat{f}_i(z_b^{(i)}) = \frac{1}{M} \sum_{m=1}^M f_i(z_b^{(i)}, c_m^{(-i)})$
-- Rank samples by $\hat{f}_i$ and assign weights $\hat{w}_{i,b}$
-- Update $\pi_{i,k}$, $\mu_{i,k}$, $S_{i,k}$ using blockwise MGIGO updates
-
----
-
-## 4. Recycling Old Samples
-
-Importance weight for reusing sample from iteration $t-1$:
-
-$$
-\omega_b = \frac{p(z_b^{t-1}; \Lambda^{t})}{p(z_b^{t-1}; \Lambda^{t-1})} = \frac{\sum_{i=1}^K \pi_i^{t} \mathcal{N}(z_b^{t-1}; \mu_i^{t}, (S_i^{t})^{-1})}{\sum_{i=1}^K \pi_i^{t-1} \mathcal{N}(z_b^{t-1}; \mu_i^{t-1}, (S_i^{t-1})^{-1})}
-$$
-
-Quantile estimator for combined samples:
-
-$$
-\widehat{q}_{\Lambda^{t}}^{f}(z_{(k)}) = \frac{\sum_{j=1}^{k-1} \omega_{(j)}}{\sum_{j=1}^{N} \omega_{(j)}}
-$$
-
-Update equations use effective weights $\omega_b \cdot \widehat{W}_b$ for each sample.
+- **Black-box friendly**: no gradients needed — only f(x) values
+- **Numerically stable**: log-transform + saturation nesting, full-range
+  distinguishability in float32
+- **Constraints as declarations**: 5 constraint types, 3 priority modes
+  (hard/soft/tunable), arbitrary M layers
+- **Zero JAX recompilation in MPC**: call `build()` once, pass dynamic info
+  via `ctx` — no recompilation across MPC steps
+- **Multi-agent**: Nash equilibrium, mixed strategies, multi-block games
 
 ---
 
+## 2. Core Solvers
+
+All solvers share the same invocation pattern:
+
+```python
+result = solver(..., fitness_fn=cost_fn, context=ctx)
+```
+
+where `cost_fn(x, ctx) -> scalar` is user-provided (or auto-generated by Constran).
+
+### 2.1 Single-Agent Continuous Optimization
+
+| Solver | File | Notes |
+|--------|------|-------|
+| `mmog_igo_optimizer_mpc` | [MPCsolverM22.py](gmm_igo/MPCsolverM22.py) | Main solver, multi-block, IGO weight clipping, lax.scan acceleration |
+| `igo_mog_optimizer` | [MPCsolver.py](gmm_igo/MPCsolver.py) | Base version, JIT-static cost function |
+| `mmog_igo_optimizer_mpc` (M23) | [MPCsolverM23.py](gmm_igo/MPCsolverM23.py) | M22 + exploration reset |
+| `blockwise_mgigo` | [blockwise_mgigo.py](gmm_igo/blockwise_mgigo.py) | Block-structured MGIGO with auto partitioning |
+
+**Unified cost function signature:**
+
+```python
+def my_cost(x, ctx):
+    # x: 1D jnp.array (decision variables)
+    # ctx: any Python object (environment state, target positions, etc.)
+    return scalar  # lower is better
+```
+
+### 2.2 Permutation Optimization (TSP)
+
+| Solver | File | Notes |
+|--------|------|-------|
+| `plackett_luce_igo_optimizer_tsp` | [TSP.py](gmm_igo/TSP.py) | Plackett-Luce permutation model |
+
+```python
+def tour_cost(tour, ctx):
+    # tour: 1D jnp.array (city visit order permutation)
+    return total_distance  # lower is better
+```
+
+### 2.3 Multi-Agent Games
+
+| Solver | File | Notes |
+|--------|------|-------|
+| `mmog_igo_rne_solver` | [MPC_G.py](gmm_igo/MPC_G.py) | Nash equilibrium with MC inner loop |
+| `mmog_igo_rne_solver` | [MPC_G_S.py](gmm_igo/MPC_G_S.py) | Sample-reuse accelerated version |
+| `mmog_igo_rne_blocks_solver` | [MPC_G_MS.py](gmm_igo/MPC_G_MS.py) | Multi-block multi-agent mixed strategies |
+
+**Multi-agent cost function signature:**
+
+```python
+def agent_cost(agent_idx, joint_x, ctx):
+    # agent_idx: int (which agent)
+    # joint_x: flat vector of all agents' joint actions
+    return scalar  # this agent's cost
+```
+
+---
+
+## 3. Constraint Transformation Engine (Constran)
+
+[Constraintdealer/Constran.py](Constraintdealer/Constran.py) is the **translator**
+between you and the solver. You declare each constraint's **type** and **priority**;
+it auto-assembles a solver-ready cost function.
+
+Full methodology: [ConstraintsTransformation_README.md](Constraintdealer/ConstraintsTransformation_README.md).
+
+### 3.1 Three Steps
+
+```python
+from Constraintdealer.Constran import *
+
+# Step 1: Write the objective
+def my_obj(x, ctx):
+    """Target tracking + control effort"""
+    return jnp.sum((x[:2] - ctx['target']) ** 2) + 0.1 * jnp.sum(x[2:] ** 2)
+
+# Step 2: Declare constraints (type + mode + priority)
+constraints = autodelta([
+    # Safety constraint — hard, non-negotiable
+    Deterministic(lambda x, ctx: -(x[0] - obstacle_x) ** 2
+                                  - (x[1] - obstacle_y) ** 2 + r_safe ** 2,
+                  mode='hard', priority=1),
+
+    # Chance constraint — tunable hardness
+    Chance(lambda x, xi, ctx: jnp.linalg.norm(x[:2] + xi) - safe_dist,
+           noise_fn=lambda key, shape: jax.random.normal(key, shape) * 0.1,
+           alpha=0.05,          # 95% probability of satisfaction
+           mode='tunable', priority=2,
+           delta_soft=2.0, beta=5.0),
+
+    # Efficiency preference — soft, trade-offs allowed
+    Deterministic(lambda x, ctx: jnp.sum(x[2:] ** 2) - efficiency_limit,
+                  mode='soft', priority=3),
+])
+
+# Step 3: Build → pass directly to solver
+cost_fn = build(my_obj, constraints)
+
+# Use in MPC loop
+for step in range(T_mpc):
+    ctx = {'target': targets[step], 'obstacle_x': obs_x[step], ...}
+    result = mmog_igo_optimizer_mpc(
+        key, T, dt, M, K, B, B0, dims, T_0,
+        fitness_fn_total=cost_fn,    # ← directly plug in
+        initial_mu_k=mu, initial_L_inv_k=L_inv, initial_v_k=v,
+        context=ctx,
+    )
+```
+
+### 3.2 Key Design Principle
+
+```
+OUTERMOST (highest priority, most important)
+    ↑
+    ├── HARD layers (safety-critical)     δ=1.5 outermost / δ=3.0 inner
+    │      Any violation → cost > ALL inner-layer maxima
+    │      Non-negotiable
+    │
+    ├── TUNABLE layers (medium)           δ_soft + β control hardness
+    │      Large β → near-hard
+    │      Small β → gradual ramp, trade-offs possible
+    │
+    ├── SOFT layers (preferences)         No δ, additive competition
+    │      Small violation + good objective > no violation + bad objective
+    │      Solver discovers optimal trade-off
+    │
+    ↓
+INNERMOST (objective function)           k_inner=0.1 (handles up to ~1e8)
+```
+
+---
+
+## 4. Supported Constraint Types
+
+All constraint values go through `sign(x)·log(1+|x|)` log-transform,
+eliminating numeric explosion regardless of raw magnitude.
+
+### 4.1 Deterministic `Deterministic`
+
+```python
+Deterministic(lambda x, ctx: g(x),      # g(x) ≤ 0
+              mode='hard', priority=1)
+```
+
+**Math**: $g(x) \le 0$
+
+**Violation**: $\mathcal{T}(g(x))$ directly — positive = violated, negative = satisfied.
+
+**Supports**: one-sided, two-sided band, and annular constraints.
+
+### 4.2 Chance (Probabilistic) `Chance`
+
+```python
+Chance(lambda x, xi, ctx: g(x, xi),      # P(g ≤ 0) ≥ 1-α
+       noise_fn=lambda key, shape: sample_noise(key, shape),
+       alpha=0.1, mode='hard', priority=1)
+```
+
+**Math**: $P(g(x,\xi) \le 0) \ge 1-\alpha$
+
+**Method**: MC quantile — $Q_{1-\alpha}(g(x,\xi)) \le 0$
+
+**Supports**: Gaussian, discrete, heavy-tailed, multiplicative noise; annular probability constraints.
+
+### 4.3 Robust (Worst-Case) `Robust`
+
+```python
+xi_grid = jnp.linspace(-3, 2, 40)
+Robust(lambda x, xi, ctx: g(x, xi),      # g(x,ξ) ≤ 0 ∀ξ∈Ξ
+       uncertainty_set=xi_grid, mode='hard', priority=1)
+```
+
+**Math**: $g(x,\xi) \le 0 \;\; \forall\xi \in \Xi$
+
+**Method**: `lax.scan` — take the maximum over the uncertainty set.
+
+**Key advantage**: handles **non-convex, disconnected** uncertainty sets
+(traditional LMI methods cannot).
+
+### 4.4 Distributionally Robust `DRO`
+
+```python
+DRO(lambda x, xi, ctx: g(x, xi),         # inf_{P∈𝒫} P(g≤0) ≥ 1-α
+    ambiguity_set=[noise_fn_1, noise_fn_2, noise_fn_3],
+    alpha=0.1, mode='hard', priority=1)
+```
+
+**Math**: $\inf_{P \in \mathcal{P}} P(g(x,\xi) \le 0) \ge 1-\alpha$
+
+**Method**: MC quantile for each candidate distribution in the ambiguity
+set, take the worst.
+
+**Interpolates between** chance (known distribution) and robust
+(no distribution assumed).
+
+---
+
+## 5. Priority Nesting System
+
+### 5.1 Three Modes Compared
+
+| Mode | Mechanism | Min Violation Cost | Trade-offs? | When to Use |
+|------|-----------|-------------------|-------------|-------------|
+| **Hard** | `jnp.where(g>0, T(g)+δ, inner)` | σ₁(δ) | No | Safety, legal constraints |
+| **Tunable** | `δ·σ(β·T(g)) + inner` | Continuous ramp | β controls | Adjustable hardness |
+| **Soft** | `T(g) + inner` | No floor | Yes | Preferences, efficiency, comfort |
+
+### 5.2 General M-Layer Framework
+
+Any number M of constraints, each independently choosing type + mode:
+
+```python
+constraints = [
+    Deterministic(g1, mode='hard',   priority=1, delta=1.5),
+    Chance(g2, ...,  mode='tunable', priority=2, delta_soft=2.0, beta=5.0),
+    Robust(g3, ...,   mode='soft',   priority=3),
+    # ... arbitrary M layers ...
+    Deterministic(gM, mode='hard',   priority=M, delta=3.0),
+]
+cost_fn = build(my_obj, constraints)
+```
+
+**Design rule: Hard outside, Soft inside.** For deep nests, δ adapts
+automatically ($\sigma_1^{(n)}(1) = 1/\sqrt{n+1}$).
+
+### 5.3 Output Range Guarantees (3-layer example)
+
+```
+L1 (Hard, static obstacles):   [0.832, 1.000)    ← any collision > any non-collision
+L2 (Hard, pedestrian safety):  [0.688, 0.707)    ← any ped violation > any pure tracking
+L3 (objective function):       [0.000, 0.577)    ← no-violation region
+```
+
+In float32, each layer has >10⁵ distinguishable values — far more than the
+~80 samples ranked per solver iteration.
+
+---
+
+## 6. Quick Start
+
+### 6.1 Installation
+
+```bash
+git clone <this-repo>
+cd gmm_igo
+uv sync  # or pip install -e .
+```
+
+Dependencies: JAX, NumPy, Matplotlib (examples only).
+
+### 6.2 Run Examples
+
+```bash
+# Deterministic constraint tests
+uv run python Functiontest/Constraints.py
+
+# Robust constraint tests
+uv run python Functiontest/RobustConstraints.py
+
+# Hybrid system MPC
+uv run python Functiontest/Hybridsystemtest.py
+
+# MPC receding horizon with obstacle avoidance
+uv run python MPCtest/MPCmain21animate.py
+```
+
+### 6.3 Minimal Example (Unconstrained)
+
+```python
+import jax.numpy as jnp
+from gmm_igo.MPCsolverM22 import mmog_igo_optimizer_mpc
+from Constraintdealer.Constran import build_unconstrained
+
+# Goal: min (x-3)² + (y+2)²
+cost_fn = build_unconstrained(lambda x, ctx: (x[0]-3)**2 + (x[1]+2)**2)
+
+result = mmog_igo_optimizer_mpc(
+    key, T=200, dt=0.1, M=30, K=5, B=80, B0=40,
+    dims=[2], T_0=50,
+    fitness_fn_total=cost_fn,
+    initial_mu_k=..., initial_L_inv_k=..., initial_v_k=...,
+    context=None,
+)
+```
+
+### 6.4 Minimal Example (Constrained)
+
+```python
+from Constraintdealer.Constran import *
+
+constraints = autodelta([
+    Deterministic(lambda x, ctx: x[0] + x[1] + 4,   # x+y >= -4
+                  mode='hard', priority=1),
+    Deterministic(lambda x, ctx: x[1] - x[0],        # y <= x
+                  mode='hard', priority=2),
+])
+
+cost_fn = build(lambda x, ctx: ((x[0]-6)**2 + (x[1]+4)**2) / 50,
+                constraints)
+
+# Pass directly to solver
+result = mmog_igo_optimizer_mpc(..., fitness_fn_total=cost_fn, ...)
+```
+
+### 6.5 Minimal Example (Multi-Agent Game)
+
+```python
+from Constraintdealer.Constran import build_multi_agent
+
+agent_fns = build_multi_agent({
+    0: (lambda x, ctx: jnp.sum((x[:2] - ctx['t0'])**2),
+        [Deterministic(lambda x, ctx: x[0] - 1, mode='hard', priority=1)]),
+    1: (lambda x, ctx: jnp.sum((x[2:] - ctx['t1'])**2),
+        []),
+})
+
+result = mmog_igo_rne_blocks_solver(
+    ..., fitness_fn_j=agent_fns[0], ...
+)
+```
+
+---
+
+## 7. Project Structure
+
+```
+gmm_igo/
+├── gmm_igo/                          # Core solvers
+│   ├── MPCsolverM22.py               # Main solver (recommended)
+│   ├── MPCsolver.py                  # Base solver
+│   ├── MPCsolverM23.py               # With exploration reset
+│   ├── blockwise_mgigo.py            # Block-structured MGIGO
+│   ├── TSP.py                        # Permutation optimization (TSP)
+│   ├── MPC_G.py                      # Multi-agent Nash equilibrium
+│   ├── MPC_G_S.py                    # Sample-reuse acceleration
+│   ├── MPC_G_MS.py                   # Multi-block multi-agent
+│   └── MPC_G_S_V.py                  # With metrics tracking
+│
+├── Constraintdealer/                 # Constraint transformation engine ★
+│   ├── Constran.py                   # Translator (core API)
+│   └── ConstraintsTransformation_README.md  # Methodology documentation
+│
+├── Functiontest/                     # Tests & examples
+│   ├── Constraints.py                # 16 constraint tests (deterministic, chance, nested)
+│   ├── RobustConstraints.py          # Robust constraint tests
+│   ├── Hybridsystemtest.py           # Production 3-level hybrid MPC
+│   ├── Hybrid_test_README.md         # 3-level nesting design doc (log-transform)
+│   └── utils.py, utilss.py           # Visualization & numeric utilities
+│
+├── MPCtest/                          # MPC receding-horizon examples
+│   ├── MPCmain21animate.py           # Obstacle avoidance MPC (hard/soft comparison)
+│   └── TSPtest.py                    # TSP test
+│
+├── MultipleTest/                     # Multi-agent pursuit game
+│   └── Trackgame.py
+│
+├── Cartest/                          # B-spline trajectory planning experiments
+│
+└── README.md                         # This file
+```
+
+---
+
+## 8. References
+
+The solver is based on the following methods:
+
+- **MGIGO-MPC**: Information-Geometric Optimization with Gaussian Mixture Models
+  for Model Predictive Control
+- **IGO**: Information-Geometric Optimization (Ollivier et al., 2017)
+- **MMOG-IGO**: Multi-Modal Optimization via Gaussian mixture IGO
+
+Engineering reference:
+- Lipeng Qi's CUDA-accelerated GMM-IGO
+
+---
+
+*"You write the objective and constraints. The solver handles the rest."*

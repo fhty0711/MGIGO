@@ -249,7 +249,10 @@ def _assemble_nest(objective_fn: Callable,
             elif mode == 'tunable':
                 delta_soft = params.get('delta_soft', 2.0)
                 beta = params.get('beta', 5.0)
-                contrib = delta_soft * sigma_k(beta * log_transform(g_raw))
+                t_val = log_transform(g_raw)
+                if penalize_only_soft:
+                    t_val = jnp.maximum(0.0, t_val)
+                contrib = delta_soft * sigma_k(beta * t_val)
                 inner = sigma_k(contrib + inner)
             else:  # 'soft'
                 t_val = log_transform(g_raw)
@@ -290,7 +293,13 @@ def build(objective_fn: Callable[[jnp.ndarray, Any], jnp.ndarray],
     k_inner : float
         Innermost σ knee. Default 0.1 (good for f up to ~1e8).
     penalize_only_soft : bool
-        If True, soft/tunable modes use max(0, T(g)) — never reward.
+        If True, soft/tunable modes use max(0, T(g)) — penalize violations
+        only, never reward deep satisfaction. Use this when constraint
+        satisfaction should not offset poor objective performance.
+        Default False — full T(g) with sign preserved (odd function chain).
+        Deeply satisfied constraints (g≪0, T(g)<0) naturally lower the cost,
+        correctly reflecting that a solution deep in the feasible region
+        is better than one at the boundary.
     validate : bool
         If True, check consistency and warn about ordering issues.
     jit_cost : bool
@@ -381,7 +390,7 @@ def build_multi_agent(
     agent_specs: Dict[int, Tuple[Callable, Optional[Sequence[ConstraintSpec]]]],
     *,
     k_inner: float = 0.1,
-    penalize_only_soft: bool = False,
+    penalize_only_soft: bool = True,
     validate: bool = True,
 ) -> Dict[int, Callable]:
     """Build agent-aware cost functions for multi-agent game solvers.

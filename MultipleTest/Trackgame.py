@@ -196,9 +196,7 @@ def fitness_fn_j_jax(agent_idx, joint_sample_flat, context_arr):
         context_arr,
     )
 
-# ======================================================================
-# 4. 纯净张量博弈驱动内核
-# ======================================================================
+
 @jit
 def pure_jax_game_rollout(solve_key, mu_init, S_init, v_init, context_arr):
     v_reset_internal = jnp.zeros((N_BLOCKS, K - 1))
@@ -347,9 +345,9 @@ def run_simulation():
     key = random.PRNGKey(SEED)
 
     # 包含执行器状态的 6 维车辆初始状态 [x, y, v, psi, curr_acc, curr_steer]
-    init_ego   = jnp.array([15.0, 0.0, 17.0, 0.0, 0.0, 0.0])       
-    init_front = jnp.array([20.0, 3.5, 20.0, 0.0, 0.0, 0.0])   
-    init_rear  = jnp.array([5.0, 3.5, 17.0, 0.0, 0.0, 0.0])    
+    init_ego   = jnp.array([15.0, 0.0, 15.0, 0.0, 0.0, 0.0])       
+    init_front = jnp.array([17.0, 3.5, 10.0, 0.0, 0.0, 0.0])   
+    init_rear  = jnp.array([13.0, 3.5, 10.0, 0.0, 0.0, 0.0])    
     current_states = jnp.stack([init_ego, init_front, init_rear])
 
     current_mu_init = random.normal(key, (N_BLOCKS, K, CONTROL_HORIZON)) * 0.5

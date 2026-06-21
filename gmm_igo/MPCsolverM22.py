@@ -7,7 +7,7 @@ import functools
 # I. 核心辅助函数 (支持异构维度掩码)
 # ======================================================================
 
-MIN_EIG = 1e-2
+MIN_EIG = 1e-3
 MAX_EIG = 1e3
 def _safe_spd_projection(S):
     """✅ FIX 3: 保证 SPD"""
@@ -21,7 +21,7 @@ def _logsumexp(a, axis=None):
     return jnp.logaddexp.reduce(a, axis=axis)
 
 @jit
-def _project_spd(mat, eps=1e-6, max_eig=1e6):
+def _project_spd(mat, eps=1e-3, max_eig=1e3):
     """Symmetrize and clip eigenvalues to keep matrix SPD."""
     sym = 0.5 * (mat + mat.T)
     eigvals, eigvecs = jnp.linalg.eigh(sym)
@@ -64,8 +64,11 @@ def _update_component_core(
     log_mog = vmap(mog_pdf_fn)(samples)
 
     # 2. IGO 权重项 (Line 26)
-    a_i = jnp.exp(jnp.clip(log_pdf_k - log_mog, -70.0, 70.0))
-    b_i = jnp.exp(jnp.clip(log_pdf_base - log_mog, -70.0, 70.0))
+    # Clip to [-20, 20] instead of [-70, 70] to prevent overflow in float32:
+    # exp(20) ≈ 4.8e8, while exp(70) ≈ 2.5e30 — the latter multiplied by
+    # S @ outer(d,d) @ S (~1e8) overflows float32 before _safe_spd_projection.
+    a_i = jnp.exp(jnp.clip(log_pdf_k - log_mog, -20.0, 20.0))
+    b_i = jnp.exp(jnp.clip(log_pdf_base - log_mog, -20.0, 20.0))
     
     # 3. 精度矩阵 S 更新 (Line 28)
     diff = (samples - mu_k)
@@ -98,7 +101,7 @@ def _step_fn(state, iter_data, M, K, B, B0, dt, dims_arr, T_0, fitness_fn, v_res
     key, _ = iter_data
     
     # T0 重置混合权重
-    v = jnp.where((t % T_0) == 0, v_reset, v)
+    v = jnp.where((t>0) & ((t % T_0) == 0), v_reset, v)
     
     def v_to_pi(v_m):
         exps = jnp.exp(jnp.clip(v_m, -70, 70))
@@ -144,7 +147,6 @@ def _step_fn(state, iter_data, M, K, B, B0, dt, dims_arr, T_0, fitness_fn, v_res
 # ======================================================================
 # IV. 顶层入口
 # ======================================================================
-
 @functools.partial(jit, static_argnums=(1, 3, 4, 5, 7, 9))
 def mmog_igo_optimizer_mpc(
     key, T, dt, M, K, B, B0, dims, T_0, 
@@ -156,7 +158,7 @@ def mmog_igo_optimizer_mpc(
     # 将 L_inv 转换为初始精度矩阵 S
     S_init = vmap(vmap(lambda L: L @ L.T))(initial_L_inv_k[:, :K, :, :])
     mu_init = initial_mu_k[:, :K, :]
-    v_init = jnp.zeros((M, K-1)) 
+    v_init =  initial_v_k
 
     state = (mu_init, S_init, v_init, 0)
     
