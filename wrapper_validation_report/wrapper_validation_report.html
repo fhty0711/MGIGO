@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Constraint Wrapper Validation Report</title>
+  <style>
+    body { margin: 0; font-family: Arial, "Microsoft YaHei", sans-serif; background: #0a1120; color: #edf3ff; }
+    main { max-width: 1180px; margin: 0 auto; padding: 34px 28px 56px; }
+    h1 { font-size: 30px; margin: 0 0 8px; }
+    h2 { margin-top: 34px; border-bottom: 1px solid #33445f; padding-bottom: 8px; }
+    p, li { line-height: 1.68; color: #d9e3f4; }
+    code { color: #9ff3bd; }
+    .card { background: #10192b; border: 1px solid #30425f; border-radius: 8px; padding: 18px; margin: 16px 0; }
+    table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+    th, td { border: 1px solid #40506b; padding: 9px 8px; text-align: center; }
+    th { background: #1b2b46; color: white; }
+    tr:nth-child(even) td { background: #132037; }
+    tr:nth-child(odd) td { background: #10192b; }
+    img { width: 100%; border: 1px solid #30425f; border-radius: 6px; background: #0a1120; }
+    .videos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    video { width: 100%; border: 1px solid #30425f; border-radius: 6px; background: black; }
+    .muted { color: #9fb0c8; font-size: 13px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Constraint Wrapper Validation Report</h1>
+  <p class="muted">Generated: 2026-06-23 21:15:35</p>
+
+  <div class="card">
+    <p><b>结论摘要：</b>matched baseline 不调用 wrapper API，但手写复现 wrapper 的 log/saturation/hard/tunable/priority 变换。测试中 matched 与 wrapper 行为和指标一致，说明效果来自这套 constraint-to-cost transformation；wrapper 的优势是把这套变换结构化、参数化、可复用，降低手写层级和饱和顺序出错风险。</p>
+  </div>
+
+  <h2>1. 测试设置</h2>
+  <ul>
+    <li>场景：<code>borrow_overtake_safe</code>, <code>borrow_overtake_blocked</code>, <code>borrow_overtake_critical</code></li>
+    <li>求解器：同一 MGIGO / MPC 闭环求解器，同一随机种子。</li>
+    <li>底层项：三组 cost 使用同一批 objective / STL-style violation 函数。</li>
+    <li>判据：return tolerance = 0.6 m；借道期间 gap >= 28 m 或 TTC >= 1.5 s 判为 conflict-free。</li>
+  </ul>
+
+  <h2>2. Cost Profile 对比</h2>
+  <table>
+    <thead><tr><th>profile</th><th>说明</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td>wrapper</td><td>调用 <code>constraint_dsl.build()</code>，声明 hard/tunable/priority。</td><td>同事 wrapper 主方案</td></tr>
+      <tr><td>old baseline</td><td>旧手写 hierarchical cost，饱和尺度和 hard penalty 与 wrapper 不一致。</td><td>对比旧手写方法</td></tr>
+      <tr><td>matched baseline</td><td>不调用 wrapper，但手写复现 wrapper 的数学变换。</td><td>控制变量验证</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 结果表</h2>
+  <table><thead><tr><th>scenario</th><th>cost</th><th>pass+return</th><th>returned</th><th>conflict-free while borrowing</th><th>min gap while borrowing (m)</th><th>min TTC while borrowing (s)</th><th>final y (m)</th><th>final v (m/s)</th><th>final lead (m)</th></tr></thead><tbody><tr><td>safe</td><td>wrapper</td><td>True</td><td>True</td><td>True</td><td>81.4</td><td>2.71</td><td>0.32</td><td>16.8</td><td>48.0</td></tr><tr><td>safe</td><td>old baseline</td><td>True</td><td>True</td><td>True</td><td>139.7</td><td>4.27</td><td>-0.19</td><td>18.0</td><td>116.1</td></tr><tr><td>safe</td><td>matched baseline</td><td>True</td><td>True</td><td>True</td><td>81.4</td><td>2.71</td><td>0.32</td><td>16.8</td><td>48.0</td></tr><tr><td>blocked</td><td>wrapper</td><td>False</td><td>True</td><td>True</td><td>148.0</td><td>5.60</td><td>0.33</td><td>10.4</td><td>-24.5</td></tr><tr><td>blocked</td><td>old baseline</td><td>False</td><td>True</td><td>True</td><td>inf</td><td>inf</td><td>0.14</td><td>9.8</td><td>-14.7</td></tr><tr><td>blocked</td><td>matched baseline</td><td>False</td><td>True</td><td>True</td><td>148.0</td><td>5.60</td><td>0.33</td><td>10.4</td><td>-24.5</td></tr><tr><td>critical</td><td>wrapper</td><td>False</td><td>True</td><td>True</td><td>232.6</td><td>9.92</td><td>-0.55</td><td>8.6</td><td>-26.0</td></tr><tr><td>critical</td><td>old baseline</td><td>True</td><td>True</td><td>False</td><td>-74.8</td><td>-2.20</td><td>0.28</td><td>17.9</td><td>109.8</td></tr><tr><td>critical</td><td>matched baseline</td><td>False</td><td>True</td><td>True</td><td>232.6</td><td>9.92</td><td>-0.55</td><td>8.6</td><td>-26.0</td></tr></tbody></table>
+  <p>关键现象：critical 场景中 old baseline 完成超车，但借道期间 min gap 和 min TTC 为负，表示对向冲突；wrapper 与 matched baseline 均选择安全等待/放弃。</p>
+
+  <h2>4. 总览图</h2>
+  <h3>安全判据表</h3>
+  <img src="assets/overview_safety_table.png" alt="safety table">
+  <h3>指标曲线</h3>
+  <img src="assets/overview_metrics.png" alt="metrics overview">
+  <h3>轨迹总览</h3>
+  <img src="assets/overview_trajectories.png" alt="trajectory overview">
+
+  <h2>5. 视频</h2>
+  <div class="videos">
+    <div><h3>safe</h3><video controls src="assets/mgigo_borrow_overtake_safe.mp4"></video></div>
+    <div><h3>blocked</h3><video controls src="assets/mgigo_borrow_overtake_blocked.mp4"></video></div>
+    <div><h3>critical</h3><video controls src="assets/mgigo_borrow_overtake_critical.mp4"></video></div>
+  </div>
+
+  <h2>6. 可复现实验命令</h2>
+  <pre><code>cd /mnt/d/claude_workspace1/IOC_AGV-main/IOC_AGV-main
+JAX_PLATFORMS=cuda uv run python compare_cost_profiles.py --force</code></pre>
+</main>
+</body>
+</html>

@@ -1,4 +1,4 @@
-# GMM-IGO: General-Purpose Optimization Solver Framework
+# MGIGO: General-Purpose Optimization Solver Framework
 
 A black-box global optimization solver based on **IGO (Information-Geometric
 Optimization)** + **GMM (Gaussian Mixture Model)**. Transforms arbitrary
@@ -425,10 +425,9 @@ The solver is based on the following methods:
 - **MGIGO-MPC**: Information-Geometric Optimization with Gaussian Mixture Models
   for Model Predictive Control
 - **IGO**: Information-Geometric Optimization (Ollivier et al., 2017)
-- **MMOG-IGO**: Multi-Modal Optimization via Gaussian mixture IGO
 
 Engineering reference:
-- Lipeng Qi's CUDA-accelerated GMM-IGO
+- Lipeng Qi's CUDA-accelerated GMM-IGO https://github.com/qlp71/IOC_AGV.git
 
 ---
 

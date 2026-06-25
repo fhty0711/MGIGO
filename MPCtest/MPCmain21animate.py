@@ -177,7 +177,8 @@ def _tracking_objective(z_flat, ctx):
     cost_v = jnp.sum(vs ** 2) * 1.0 + jnp.sum(ws ** 2) * 0.5
     mu_reg = 0.01 * (jnp.sum(raw_actions[:, 0] ** 2) + jnp.sum(raw_actions[:, 1] ** 2))
 
-    return cost_track + cost_final + cost_v + mu_reg
+    #return cost_track + cost_final + cost_v + mu_reg
+    return cost_track + cost_final + cost_v
 
 
 def _obstacle_violation(z_flat, ctx):
@@ -194,7 +195,7 @@ def _obstacle_violation(z_flat, ctx):
     diff = trajectory[:, None, :] - obs_pos[None, :, :]
     min_dists = jnp.min(jnp.linalg.norm(diff, axis=-1), axis=-1)
     penetration = safe_dist - min_dists
-    return jnp.sum(jnp.where(penetration > 0.0, 1.5 + penetration, 0.0))
+    return jnp.sum(jnp.where(penetration > 0.0,  penetration, 0.0))
 
 
 # Build the nested cost via Constran (no jit — we wrap with rollout + jit below)

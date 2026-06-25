@@ -107,17 +107,24 @@ class Chance(ConstraintSpec):
     g_fn(x, xi, ctx) -> scalar.
     noise_fn(key, shape) -> noise samples from known distribution.
     alpha: risk level (0.1 means 90% probability).
-    n_samples: MC sample count (default 100).
+    n_samples: MC sample count per batch (default 100).
+    n_batches: number of independent MC batches (default 3).
+        The final violation is the average quantile across batches,
+        reducing estimation variance by ~√n_batches.
+        Set to 1 for speed, 3–5 for stability.
     """
     g_fn: Optional[Callable] = None
     noise_fn: Optional[Callable] = None
     alpha: float = 0.1
     n_samples: int = 100
+    n_batches: int = 3
 
     def __post_init__(self):
         super().__post_init__()
         if not (0 < self.alpha < 1):
             raise ValueError(f"alpha must be in (0, 1), got {self.alpha}")
+        if self.n_batches < 1:
+            raise ValueError(f"n_batches must be >= 1, got {self.n_batches}")
 
 
 @dataclass
@@ -170,12 +177,22 @@ def _make_violation_fn(spec: ConstraintSpec) -> Callable:
         noise_fn = spec.noise_fn
         alpha = spec.alpha
         M = spec.n_samples
+        B = spec.n_batches
 
         def chance_violation(x, ctx):
-            key = random.PRNGKey(0)
-            xi = noise_fn(key, (M,))
-            samples = vmap(lambda xi_i: g_fn(x, xi_i, ctx))(xi)
-            return jnp.quantile(samples, 1.0 - alpha)
+            # Read key from ctx (per-call diversity), with fallback.
+            # Pass as ctx['rng_key'] in the MPC loop for proper noise diversity.
+            base_key = ctx.get('rng_key', random.PRNGKey(0))
+
+            # Average quantile over B independent batches → √B variance reduction
+            def batch_quantile(b):
+                batch_key = random.fold_in(base_key, b)
+                xi = noise_fn(batch_key, (M,))
+                samples = vmap(lambda xi_i: g_fn(x, xi_i, ctx))(xi)
+                return jnp.quantile(samples, 1.0 - alpha)
+
+            quantiles = vmap(batch_quantile)(jnp.arange(B))
+            return jnp.mean(quantiles)
 
         return chance_violation
 

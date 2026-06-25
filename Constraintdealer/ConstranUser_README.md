@@ -222,6 +222,27 @@ Chance(..., mode='tunable', priority=1, delta_soft=3.0, beta=50)
 | 违反步数重要，深度不重要 | `count` | 广度 > 深度 |
 | 允许 5% 步违规 | `Q₉₅` | 鲁棒性 |
 
+### 先 T 再 Sum（每点独立压缩再聚合）
+
+当前 Constran 对 `g_fn` 返回的标量做 T —— 即**先 sum 再 T**。
+如果想**先 T 再 sum**（每采样点独立压缩再累加），直接在 `g_fn` 里做：
+
+```python
+def g_fn(x, ctx):
+    pens = compute_penetrations(x)          # (200,) 向量
+    return jnp.sum(log_transform(pens))     # 先 T 再 sum
+    # Constran 会再 T 一次 → "双重 T"
+```
+
+**双重 T 无害：**
+
+- **小值线性区**：T(x)≈x。T(T(x)) ≈ T(x)，和单层没区别。
+- **大值额外压缩**：T(10)≈2.40，200×2.40=480，T(480)≈6.18。对比单层 T(2000)≈7.60 —— 压得更狠但排序不变。Tunable 最后还有 σ 封顶，多压一点无所谓。
+- **单调性完好**：T 是严格单调的，双重 T 仍然是严格单调的。
+
+本质：T 的线性区（小值）和 σ 的封顶（大值）让双重 T 不会引入问题。
+不需要改 Constran，直接在 `g_fn` 里写就行。
+
 ### 完整语义 → 方案映射
 
 ```
