@@ -575,7 +575,6 @@ gmm_igo/
 - **MGIGO-MPC**: Information-Geometric Optimization with Gaussian Mixture Models
   for Model Predictive Control
 - **IGO**: Information-Geometric Optimization (Ollivier et al., 2017)
-- **MMOG-IGO**: Multi-Modal Optimization via Gaussian mixture IGO
 - **RNE**: Recursive Nash Equilibrium via sample-based best-response estimation
 - **MCTS**: Monte Carlo Tree Search with UCB1 (Kocsis & Szepesvári, 2006)
 

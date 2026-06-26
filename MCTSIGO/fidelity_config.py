@@ -45,6 +45,8 @@ class FidelityConfig:
     budget_full : int or None — full 评估的预算（None = 自动）.
 
     uct_c : float — UCT 探索系数 (默认 1/√2).
+
+    P.S 实际上在Build 的时候，需要根据树的结构 选择IGO 样本数，因为IGO 的样本数大约需要3-4倍它搜索的决策变量数。
     """
     # 启用开关
     none_enabled: bool = True
@@ -70,6 +72,12 @@ class FidelityConfig:
 
     # UCT 参数
     uct_c: float = 0.7071067811865476  # 1/√2
+
+    # Q 计算模式
+    q_mode: str = 'elite'  # 'elite' | 'mean'
+    elite_fraction_none: float = 0.5   # none 保真度的精英比例
+    elite_fraction_light: float = 0.3  # light 保真度的精英比例
+    elite_fraction_full: float = 0.2   # full 保真度的精英比例（最严）
 
     def __post_init__(self):
         if self.light_T < 1 or self.full_T < 1:
