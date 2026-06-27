@@ -204,7 +204,84 @@ k = suggest_k(typical=2.0, max=100.0)
 3. 若某项总是显示 `[saturated]` → 减小 k（拓宽范围）
 4. 若某项总是显示 `[linear]` 且贡献很小 → 增大 k
 
-## 7. API 参考
+## 7. 自适应 k：通过语义角色自动校准
+
+当你**不知道**各项的量级时，用 `compose_objective_adaptive`。你不需要指定 k，
+只需给每项分配一个**语义角色**，k 会从随机样本的经验分布中自动校准。
+
+### 7.1 核心思想
+
+| 你知道 | 你不知道 |
+|--------|---------|
+| 这是我的*主要*目标 | 它的典型原始值 |
+| 这是*次要*偏好 | 它的最大值 |
+| 这是*平局决胜*项 | 它的动态范围 |
+
+角色映射到一个**分位数（percentile）**。knee 就取在该分位数处，k 自动导出。
+
+| 角色 | 分位数 | knee 位置 | 含义 |
+|------|--------|----------|------|
+| `'primary'` | P50 | 中位数 | 宽线性区 — 最差一半才饱和 |
+| `'secondary'` | P70 | 70分位 | 适中 — 70% 在线性区 |
+| `'tiebreaker'` | P95 | 95分位 | 几乎全线性 — 仅极端值饱和 |
+
+也可以直接传浮点数：`0.40` = P40, `0.99` = P99。
+
+### 7.2 用法
+
+```python
+from Constraintdealer.ObjectiveComposer import compose_objective_adaptive
+
+ctx_calib = {'target': jnp.array([8.0, 6.0]),
+             'init_state': jnp.array([0., 0., 0., 0.])}
+
+obj = compose_objective_adaptive([
+    (跟踪函数,   'primary',    "跟踪"),       # P50
+    (终端函数,   'secondary',  "终端"),       # P70
+    (平滑函数,   'tiebreaker', "平滑"),       # P95
+], n_dims=16, bounds=(-5.0, 5.0), n_samples=1000,
+   ctx_calib=ctx_calib)
+```
+
+校准期间输出：
+```
+--- Adaptive K Calibration ---
+  跟踪              : P50  knee=4.2371  k=0.6645
+  终端              : P70  knee=0.8920  k=1.4752
+  平滑              : P95  knee=6.1804  k=0.5100
+```
+
+### 7.3 样本来源（根据成本选择）
+
+| 来源 | 参数 | 额外开销 | 适用场景 |
+|------|------|---------|---------|
+| 随机均匀 | `n_dims` + `bounds` | n_samples × term 调用 | 冷启动，term 便宜 |
+| 预热样本 | `warmup_samples` | **零** | MPC：复用求解器第一步的样本 |
+| 自定义生成器 | `sample_fn` | n_samples 次调用 | 已知决策空间结构 |
+
+```python
+# 零开销：复用求解器 warmup 阶段的样本
+obj = compose_objective_adaptive([
+    (track_fn, 'primary', "跟踪"),
+], warmup_samples=mu_k_samples, ctx_calib=ctx)
+
+# 低成本：随机均匀
+obj = compose_objective_adaptive([
+    (track_fn, 'primary', "跟踪"),
+], n_dims=16, bounds=(-3.0, 3.0), n_samples=500, ctx_calib=ctx)
+```
+
+### 7.4 与 build() 集成
+
+```python
+from Constraintdealer.Constran import build, Deterministic
+
+obj = compose_objective_adaptive([...], n_dims=16, ctx_calib=ctx)
+cost_fn = build(obj, [Deterministic(obs_fn, mode='hard', priority=1)])
+# cost_fn 直接给求解器
+```
+
+## 8. API 参考
 
 ### `compose_objective(terms, *, k_outer=1.0, jit_result=True)`
 
@@ -222,6 +299,12 @@ k = suggest_k(typical=2.0, max=100.0)
 
 从典型值和最大值自动推荐 k。每项是 `(fn, typical, max_or_None)`。
 
+### `compose_objective_adaptive(terms, *, n_dims=..., bounds=..., ..., ctx_calib=..., k_outer=1.0)`
+
+从语义角色自动校准 k。每项是 `(fn, role, name?)`。
+角色：`'primary'`（P50）、`'secondary'`（P70）、`'tiebreaker'`（P95），
+或浮点数分位数。必须提供 `ctx_calib` 和样本来源。
+
 ### `knee_to_k(raw_knee) -> float`
 
 将物理 knee 转换为 k。`raw_knee = exp(1/k) - 1`。
@@ -238,14 +321,14 @@ k = suggest_k(typical=2.0, max=100.0)
 
 逐项诊断：原始值、压缩值、饱和状态。
 
-## 8. 不适用的情况
+## 9. 不适用的情况
 
 - **单项目标**：用 `build_unconstrained()` 更简单
 - **已经归一化**：如果所有项本来就自然落在 [0, 1]，直接求和即可
 - **已知固定权重**：如果权重已经调好且工作正常，保持原样
 - **基于梯度的求解器**：sigma 嵌套增加了非线性，请检查梯度方法是否容忍（IGO 无梯度，无此问题）
 
-## 9. Demo
+## 10. Demo
 
 ```bash
 # 对比三种模式（不需要求解器）
@@ -258,7 +341,7 @@ uv run python Functiontest/ObjectiveComposer_demo.py --optimize
 uv run python Functiontest/ObjectiveComposer_demo.py --mode composed --optimize
 ```
 
-## 10. 与 Constran 的关系
+## 11. 与 Constran 的关系
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -286,7 +369,7 @@ ObjectiveComposer 结构化**最内层**（目标函数），Constran 结构化*
 
 ---
 
-## 11. 与小增益定理的联系
+## 12. 与小增益定理的联系
 
 我们基于 k 的增益控制与非线性控制理论中的**小增益定理**（Small Gain Theorem）
 有深刻的结构平行。本节形式化这一联系。

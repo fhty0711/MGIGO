@@ -207,7 +207,87 @@ k = suggest_k(typical=2.0, max=100.0)
 3. If a term always shows `[saturated]` → reduce its k (widen range)
 4. If a term always shows `[linear]` and contributes little → increase k
 
-## 7. API Reference
+## 7. Adaptive k via Semantic Roles
+
+When you **don't know** the magnitude of each term upfront, use
+`compose_objective_adaptive`. Instead of specifying k, you assign each term
+a **semantic role**, and k is auto-calibrated from the empirical distribution
+of random samples.
+
+### 7.1 The Idea
+
+| You know | You don't know |
+|----------|---------------|
+| This is my *main* objective | Its typical raw value |
+| This is a *secondary* preference | Its maximum |
+| This is a *tiebreaker* | Its dynamic range |
+
+The role maps to a **percentile** of the term's empirical distribution.
+The knee is set at that percentile, and k is derived automatically.
+
+| Role | Percentile | Knee at | Meaning |
+|------|-----------|---------|---------|
+| `'primary'` | P50 | Median | Wide linear range — worst half saturates |
+| `'secondary'` | P70 | 70th pctile | Moderate — 70% in linear region |
+| `'tiebreaker'` | P95 | 95th pctile | Mostly linear — only extremes saturate |
+
+You can also pass a bare float: `0.40` = P40, `0.99` = P99.
+
+### 7.2 Usage
+
+```python
+from Constraintdealer.ObjectiveComposer import compose_objective_adaptive
+
+ctx_calib = {'target': jnp.array([8.0, 6.0]),
+             'init_state': jnp.array([0., 0., 0., 0.])}
+
+obj = compose_objective_adaptive([
+    (tracking_fn,   'primary',    "tracking"),     # P50
+    (final_fn,      'secondary',  "final"),        # P70
+    (smooth_fn,     'tiebreaker', "smoothness"),   # P95
+], n_dims=16, bounds=(-5.0, 5.0), n_samples=1000,
+   ctx_calib=ctx_calib)
+```
+
+Output during calibration:
+```
+--- Adaptive K Calibration ---
+  tracking            : P50  knee=4.2371  k=0.6645
+  final               : P70  knee=0.8920  k=1.4752
+  smoothness          : P95  knee=6.1804  k=0.5100
+```
+
+### 7.3 Sample Sources (choose based on cost)
+
+| Source | Parameter | Extra cost | When |
+|--------|----------|------------|------|
+| Random uniform | `n_dims` + `bounds` | n_samples × term calls | Cold start, cheap terms |
+| Warmup samples | `warmup_samples` | **Zero** | MPC: reuse solver's first-step samples |
+| Custom generator | `sample_fn` | n_samples calls | Known decision space structure |
+
+```python
+# Zero-overhead: reuse solver samples from warmup
+obj = compose_objective_adaptive([
+    (track_fn, 'primary', "track"),
+], warmup_samples=mu_k_samples, ctx_calib=ctx)
+
+# Cheap: random uniform
+obj = compose_objective_adaptive([
+    (track_fn, 'primary', "track"),
+], n_dims=16, bounds=(-3.0, 3.0), n_samples=500, ctx_calib=ctx)
+```
+
+### 7.4 Integration with build()
+
+```python
+from Constraintdealer.Constran import build, Deterministic
+
+obj = compose_objective_adaptive([...], n_dims=16, ctx_calib=ctx)
+cost_fn = build(obj, [Deterministic(obs_fn, mode='hard', priority=1)])
+# cost_fn ready for solver
+```
+
+## 8. API Reference
 
 ### `compose_objective(terms, *, k_outer=1.0, jit_result=True)`
 
@@ -225,6 +305,12 @@ Returns `(x, ctx) -> scalar` in [0, 1).
 
 Auto-suggest k from typical and max. Each term is `(fn, typical, max_or_None)`.
 
+### `compose_objective_adaptive(terms, *, n_dims=..., bounds=..., ..., ctx_calib=..., k_outer=1.0)`
+
+Auto-calibrate k from semantic roles. Each term is `(fn, role, name?)`.
+Role: `'primary'` (P50), `'secondary'` (P70), `'tiebreaker'` (P95),
+or a float percentile. Requires `ctx_calib` and a sample source.
+
 ### `knee_to_k(raw_knee) -> float`
 
 Convert physical knee to k. `raw_knee = exp(1/k) - 1`.
@@ -241,7 +327,7 @@ Heuristic k suggestion from typical and max values.
 
 Per-term diagnostic: raw value, compressed value, saturation status.
 
-## 8. When NOT to Use
+## 9. When NOT to Use
 
 - **Single-term objective**: `build_unconstrained()` is simpler
 - **Already normalized**: if all terms are naturally in [0, 1], just sum them
@@ -249,7 +335,7 @@ Per-term diagnostic: raw value, compressed value, saturation status.
 - **Gradient-based solvers**: the sigma nesting adds nonlinearity; check if your
   gradient method tolerates it (IGO is gradient-free, so no issue)
 
-## 9. Demo
+## 10. Demo
 
 ```bash
 # Compare all three modes (no solver needed)
@@ -262,7 +348,7 @@ uv run python Functiontest/ObjectiveComposer_demo.py --optimize
 uv run python Functiontest/ObjectiveComposer_demo.py --mode composed --optimize
 ```
 
-## 10. Relationship to Constran
+## 11. Relationship to Constran
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -291,7 +377,7 @@ but at different levels: ObjectiveComposer structures the **innermost** layer
 
 ---
 
-## 11. Connection to the Small Gain Theorem
+## 12. Connection to the Small Gain Theorem
 
 The user has observed a deep structural parallel between our k-based gain control
 and the **Small Gain Theorem** (小增益理论) from nonlinear control theory.

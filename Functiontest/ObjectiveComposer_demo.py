@@ -38,7 +38,8 @@ import numpy as np
 from jax import random, jit, vmap
 
 from Constraintdealer.ObjectiveComposer import (
-    compose_objective, compose_objective_auto, knee_to_k, k_to_knee, suggest_k
+    compose_objective, compose_objective_auto, compose_objective_adaptive,
+    knee_to_k, k_to_knee, suggest_k
 )
 from Constraintdealer.Constran import sigma_k, log_transform
 
@@ -154,6 +155,22 @@ def cost_auto(z_flat, ctx):
     return _cost_auto_base(z_flat, ctx)
 
 
+# --- Mode 4: Adaptive (semantic roles, auto-calibrated k) ---
+# Uses compose_objective_adaptive — each term gets a semantic role instead of k.
+# Calibration happens ONCE here (module load time).
+_cost_adaptive_base = compose_objective_adaptive([
+    (tracking_term,   'primary',    "tracking"),     # P50: knee at median
+    (final_term,      'secondary',  "final"),        # P70
+    (smoothness_term, 'tiebreaker', "smoothness"),   # P95
+], n_dims=16, bounds=(-5.0, 5.0), n_samples=800,
+   ctx_calib={'init_state': jnp.array([0.0, 0.0, 0.0, 0.0]),
+              'target': jnp.array([8.0, 6.0])})
+
+@jit
+def cost_adaptive(z_flat, ctx):
+    return _cost_adaptive_base(z_flat, ctx)
+
+
 # ===========================================================================
 # 4. Comparison Runner
 # ===========================================================================
@@ -176,10 +193,11 @@ def run_comparison():
         ty = random.uniform(random.fold_in(k, 1), (H,), minval=-3.0, maxval=3.0)
         z_samples.append(jnp.concatenate([tx, ty]))
 
-    # Evaluate all three cost functions
+    # Evaluate all four cost functions
     manual_vals = np.array([float(cost_manual(z, ctx)) for z in z_samples])
     composed_vals = np.array([float(cost_composed(z, ctx)) for z in z_samples])
     auto_vals = np.array([float(cost_auto(z, ctx)) for z in z_samples])
+    adaptive_vals = np.array([float(cost_adaptive(z, ctx)) for z in z_samples])
 
     # --- Report ---
     print("=" * 70)
@@ -225,6 +243,14 @@ def run_comparison():
     print(f"  Mean: {auto_vals.mean():.4f}  Std: {auto_vals.std():.4f}")
     print()
 
+    print("--- Adaptive (semantic roles, auto-calibrated k) ---")
+    print(f"  Roles: tracking='primary' (P50), final='secondary' (P70),")
+    print(f"         smoothness='tiebreaker' (P95)")
+    print(f"  k values auto-calibrated from 800 random samples")
+    print(f"  Cost range: [{adaptive_vals.min():.4f}, {adaptive_vals.max():.4f}]")
+    print(f"  Mean: {adaptive_vals.mean():.4f}  Std: {adaptive_vals.std():.4f}")
+    print()
+
     # --- Key insight ---
     print("--- Key Observations ---")
     print(f"  1. All three modes bounded in [0, 1): ✓")
@@ -253,7 +279,7 @@ def run_optimization(mode='composed'):
     ctx = {'init_state': init_state, 'target': target}
 
     cost_fn = {'manual': cost_manual, 'composed': cost_composed,
-               'auto': cost_auto}[mode]
+               'auto': cost_auto, 'adaptive': cost_adaptive}[mode]
 
     initial_mu = jnp.zeros((M, K, H))
     for c in range(K):
@@ -302,7 +328,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="ObjectiveComposer demo — manual vs composed vs auto-k")
     parser.add_argument('--mode', default='all',
-                        choices=['all', 'manual', 'composed', 'auto', 'compare'],
+                        choices=['all', 'manual', 'composed', 'auto', 'adaptive',
+                                 'compare'],
                         help="Which mode(s) to run")
     parser.add_argument('--optimize', action='store_true',
                         help="Run IGO optimization (requires solver)")
