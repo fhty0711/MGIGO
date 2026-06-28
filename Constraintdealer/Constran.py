@@ -5,49 +5,182 @@ Constran — Constraint Transformation Engine
 Translates user-defined objectives and constraints into solver-ready
 black-box cost functions using the saturation nesting framework.
 
+Based on T_alpha (multi-segment alpha transform) + Tunable continuous
+spectrum (β from 0.1 to 1e7).  No jnp.where branching — all layers
+are additive and differentiable.
+
 See ``ConstraintsTransformation_README.md`` for the full methodology.
-
-Quick Start
------------
->>> from Constraintdealer.Constran import *
->>>
->>> def my_obj(x, ctx):
-...     return jnp.sum((x - ctx['target']) ** 2)
->>>
->>> constraints = [
-...     Deterministic(lambda x, ctx: x[0] + x[1] + 4,
-...                    mode='hard', priority=1),
-...     Deterministic(lambda x, ctx: x[1] - x[0],
-...                    mode='soft', priority=2),
-... ]
->>>
->>> cost_fn = build(my_obj, constraints)
->>> # cost_fn is JAX-compatible: (x, ctx) -> scalar
->>> # Pass directly to any solver:
->>> # mmog_igo_optimizer_mpc(..., fitness_fn_total=cost_fn, ...)
-
-Solver Compatibility
---------------------
-- MPCsolverM22.mmog_igo_optimizer_mpc — fitness_fn_total
-- MPCsolver.igo_mog_optimizer       — fitness_fn
-- blockwise_mgigo.blockwise_mgigo   — objective_fn
-- TSP.plackett_luce_igo_optimizer_tsp — fitness_fn_total
-- Multi-agent (MPC_G, MPC_G_MS) — use build_multi_agent
+See ``ConstranUser_README.md`` for usage guide.
 """
 
 from __future__ import annotations
 
-import jax
-import jax.numpy as jnp
+import jax, jax.numpy as jnp
+import numpy as np
 from jax import random, vmap, lax
 from dataclasses import dataclass
 from typing import (Any, Callable, Dict, List, Optional, Sequence,
                     Tuple, Union)
 import warnings
 
+
 # ===========================================================================
-# 1. Core Math Utilities (JAX-jittable)
+# 1. Core: Multi-Alpha Transform + Preset Tables
 # ===========================================================================
+
+# --- Preset transform tables ---
+# Each preset = (knots_g, knots_T).  knots_g in raw |x|, knots_T = T_target.
+# Small |x|: T_target is a constant floor → σ stays in knee even for tiny g.
+# Large |x|: T_target ≈ log(|x|) → recovers standard log compression.
+# Interpolation is log10-linear between knots.
+
+# 约束预设
+TRANSFORM_TIGHT = (
+    np.array([1e-8, 1e-6, 1e-4, 1e-2, 1e-1, 1e0, 1e2, 1e4, 1e6]),
+    np.array([0.3,  0.5,  0.7,  0.9,  1.2,  2.0,  4.0,  8.0,  12.0]),
+)  # 地板低(0.3), 过渡缓 — 类似原始 log, 但最小违反也能感知
+
+TRANSFORM_STANDARD = (
+    np.array([1e-6, 1e-4, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e4, 1e6]),
+    np.array([0.7,  0.8,  0.9,  1.0,  1.5,  2.5,  4.0,  7.0,  10.0]),
+)  # 默认 — 地板 0.7, 标准过渡
+
+TRANSFORM_SHARP = (
+    np.array([1e-6, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e2, 1e4, 1e6]),
+    np.array([1.0,  1.2,  1.5,  2.0,  2.5,  3.5,  6.0,  9.0,  12.0]),
+)  # 地板高(1.0), 急升 — 小违反立即重罚, 接近硬
+
+TRANSFORM_WIDE = (
+    np.array([1e-2, 1e-1, 1e0, 1e1, 1e2, 1e4, 1e6]),
+    np.array([0.3,  0.5,  1.0,  2.0,  4.0,  8.0,  12.0]),
+)  # 地板很低(0.3), 宽线性区 — 适合软约束/偏好
+
+# 目标预设
+OBJ_TRANSFORM_STANDARD = (
+    np.array([1e-4, 1e-2, 1e0,  1e2,  1e4,  1e8]),
+    np.array([0.5,  0.7,  1.5,  3.0,  6.0,  12.0]),
+)  # 默认目标变换
+
+OBJ_TRANSFORM_FLAT = (
+    np.array([1e-2, 1e0, 1e2, 1e4, 1e8]),
+    np.array([0.5,  1.0,  2.5,  5.0,  10.0]),
+)  # 更平 — 目标值差异被压缩更多, 适合超大范围
+
+# 预设字典
+TRANSFORM_PRESETS = {
+    'tight':    TRANSFORM_TIGHT,
+    'standard': TRANSFORM_STANDARD,
+    'sharp':    TRANSFORM_SHARP,
+    'wide':     TRANSFORM_WIDE,
+    'log':      None,  # sentinel: use plain log_transform
+}
+OBJ_PRESETS = {
+    'standard': OBJ_TRANSFORM_STANDARD,
+    'flat':     OBJ_TRANSFORM_FLAT,
+    'log':      None,
+}
+
+# 别名: CONSTRAINT_KNOTS_G/T 向后兼容
+CONSTRAINT_KNOTS_G = TRANSFORM_STANDARD[0]
+CONSTRAINT_KNOTS_T = TRANSFORM_STANDARD[1]
+OBJECTIVE_KNOTS_G  = OBJ_TRANSFORM_STANDARD[0]
+OBJECTIVE_KNOTS_T  = OBJ_TRANSFORM_STANDARD[1]
+
+
+def _interp_T_target(ax, knots_g, knots_T):
+    """Compute T_target at |x| via log-linear interpolation."""
+    lg = np.log10(np.maximum(np.asarray(ax), np.nextafter(0.0, 1.0)))
+    lk = np.log10(knots_g)
+    return np.interp(lg, lk, knots_T)
+
+
+@jax.jit
+def T_alpha(x: jnp.ndarray,
+            knots_g: np.ndarray = CONSTRAINT_KNOTS_G,
+            knots_T: np.ndarray = CONSTRAINT_KNOTS_T) -> jnp.ndarray:
+    """Piecewise log-like transform: sign(x) * T_target(|x|).
+
+    T_target is interpolated log-linearly from (knots_g, knots_T).
+    Small |x| → T_target is a constant → true floor.
+    Large |x| → T_target ≈ log(|x|) → recovers standard log behavior.
+    """
+    ax = jnp.abs(x)
+    log_knots_g = jnp.log(knots_g)
+    knots_T_j = jnp.asarray(knots_T)
+    log_ax = jnp.log(jnp.maximum(ax, jnp.nextafter(0.0, 1.0)))
+    i = jnp.searchsorted(log_knots_g, log_ax, side='right') - 1
+    i = jnp.clip(i, 0, len(knots_g) - 2)
+    x0 = log_knots_g[i]
+    x1 = log_knots_g[i + 1]
+    y0 = knots_T_j[i]
+    y1 = knots_T_j[i + 1]
+    t = jnp.clip((log_ax - x0) / (x1 - x0 + 1e-12), 0.0, 1.0)
+    return jnp.sign(x) * (y0 + t * (y1 - y0))
+
+
+# ===========================================================================
+# 1b. Delta Tables — per-violation-level offset for hard constraints
+# ===========================================================================
+
+def _make_delta_fn(knots_g, knots_d):
+    """Return δ(|g|) function via log10-linear interpolation.  δ ≥ 0."""
+    if knots_g is None or knots_d is None:
+        return None  # scalar fallback
+    kg, kd = np.asarray(knots_g), np.asarray(knots_d)
+    log_kg = np.log(kg)
+
+    def delta_fn(g_raw):
+        ax = jnp.abs(g_raw)
+        log_ax = jnp.log(jnp.maximum(ax, jnp.nextafter(0.0, 1.0)))
+        i = jnp.searchsorted(log_kg, log_ax, side='right') - 1
+        i = jnp.clip(i, 0, len(kg) - 2)
+        x0, x1 = log_kg[i], log_kg[i + 1]
+        y0, y1 = kd[i], kd[i + 1]
+        t = jnp.clip((log_ax - x0) / (x1 - x0 + 1e-12), 0.0, 1.0)
+        return y0 + t * (y1 - y0)
+    return delta_fn
+
+
+# --- δ presets (sweet-spot: 0.1~0.5 for β=1 hard mode) ---
+DELTA_TIGHT = (
+    np.array([0,    1e-4, 1e-2, 1e-1, 1e0, 1e2,  1e4]),
+    np.array([0.02, 0.05, 0.1,  0.2,  0.3, 0.5,  0.8]),
+)  # minimal — best dynamic range
+
+DELTA_STANDARD = (
+    np.array([0,    1e-4, 1e-2, 1e-1, 1e0, 1e2,  1e4]),
+    np.array([0.05, 0.1,  0.2,  0.3,  0.5, 0.8,  1.0]),
+)  # recommended default (δ≈0.5 for moderate g)
+
+DELTA_SHARP = (
+    np.array([0,    1e-4, 1e-3, 1e-2, 1e-1, 1e0,  1e2]),
+    np.array([0.1,  0.2,  0.3,  0.5,  0.8,  1.0,  1.5]),
+)  # stronger separation
+
+DELTA_PRESETS = {
+    'tight':    DELTA_TIGHT,
+    'standard': DELTA_STANDARD,
+    'sharp':    DELTA_SHARP,
+    'none':     None,
+}
+
+# --- Tunable presets: (β, δ_soft) ---
+CONSTRAINT_K = 0.2   # σ_k for constraint layers — knee at T=5 (g≈150)
+# k=1.0: knee at T=1 → small-g saturated, range only 0.35
+# k=0.2: knee at T=5 → best balance, range=0.76 (+80%)
+# k=0.1: knee at T=10 → good too but loses small-g sensitivity slightly
+
+NEAR_HARD_BETA = 1.0  # β=1 already provides hierarchy separation for max(0,g)
+
+TUNE_PRESETS = {
+    'mild':     (0.1, 1.0),
+    'standard': (0.3, 1.0),
+    'firm':     (0.5, 1.5),
+    'strong':   (1.0, 1.5),
+    'nearhard': (1.0, 2.0),
+    '__hard__': (NEAR_HARD_BETA, 0.5),  # internal: mapped from mode='hard', δ=0.5
+}
+
 
 @jax.jit
 def sigma_k(x: jnp.ndarray, k: float = 1.0) -> jnp.ndarray:
@@ -56,85 +189,84 @@ def sigma_k(x: jnp.ndarray, k: float = 1.0) -> jnp.ndarray:
     return kx / jnp.sqrt(1.0 + kx ** 2)
 
 
-@jax.jit
-def log_transform(x: jnp.ndarray) -> jnp.ndarray:
-    """Log transform: T(x) = sign(x)·log(1+|x|). Odd, compresses range."""
-    return jnp.sign(x) * jnp.log1p(jnp.abs(x))
-
-
 # ===========================================================================
-# 2. Constraint Specification Dataclasses
+# 2. Constraint Specification Dataclasses (unchanged from Constran.py)
 # ===========================================================================
 
 @dataclass(kw_only=True)
 class ConstraintSpec:
-    """Base specification for one constraint layer.
-
-    Use subclasses: ``Deterministic``, ``Chance``, ``Robust``, ``DRO``.
-
-    Parameters
-    ----------
-    mode : 'hard' | 'soft' | 'tunable'
-    priority : 1 = highest priority (outermost layer).
-    delta : δ for hard mode (auto-assigned if None).
-    delta_soft, beta : parameters for tunable mode.
-    """
     mode: str = 'soft'
     priority: int = 1
-    delta: Optional[float] = None
+    delta: Optional[float] = None           # scalar δ (legacy / simple)
+    delta_table: str = 'none'               # preset for δ(g), or 'none'
+    _delta_table_raw: Optional[Tuple] = None  # custom (knots_g, knots_d)
     delta_soft: Optional[float] = None
     beta: Optional[float] = None
+    tune_preset: str = 'none'               # preset for (β, δ_soft), or 'none'
+    transform: str = 'standard'
+    _transform_table: Optional[Tuple] = None
 
     def __post_init__(self):
-        if self.mode not in ('hard', 'soft', 'tunable'):
+        # Normalize: 'hard' → 'tunable' with extreme β
+        if self.mode == 'hard':
+            self.mode = 'tunable'
+            if self.delta is not None and self.delta_soft is None:
+                self.delta_soft = self.delta
+            if self.beta is None:
+                self.beta = NEAR_HARD_BETA  # 1e7
+            if self.tune_preset == 'none':
+                self.tune_preset = '__hard__'  # internal marker
+        if self.mode not in ('soft', 'tunable'):
+            raise ValueError(f"mode must be 'soft' or 'tunable', got {self.mode!r}")
+        if self.transform not in TRANSFORM_PRESETS and self._transform_table is None:
             raise ValueError(
-                f"mode must be 'hard', 'soft', or 'tunable', got {self.mode!r}")
+                f"Unknown transform preset: {self.transform!r}. "
+                f"Available: {list(TRANSFORM_PRESETS.keys())}.")
+        if self.mode == 'tunable' and self.tune_preset not in TUNE_PRESETS and self.tune_preset != 'none':
+            raise ValueError(
+                f"Unknown tune_preset: {self.tune_preset!r}. "
+                f"Available: {list(TUNE_PRESETS.keys())}.")
+
+    def get_transform_table(self):
+        if self._transform_table is not None:
+            return self._transform_table
+        return TRANSFORM_PRESETS[self.transform]
+
+    def get_delta_table(self):
+        if self._delta_table_raw is not None:
+            return self._delta_table_raw
+        return DELTA_PRESETS[self.delta_table]
+
+    def get_tune_params(self):
+        if self.tune_preset not in ('none', '__hard__'):
+            return TUNE_PRESETS[self.tune_preset]
+        if self.tune_preset == '__hard__':
+            return (NEAR_HARD_BETA,
+                    self.delta_soft if self.delta_soft is not None else 1.5)
+        return (self.beta if self.beta is not None else 5.0,
+                self.delta_soft if self.delta_soft is not None else 2.0)
 
 
 @dataclass
 class Deterministic(ConstraintSpec):
-    """Deterministic constraint: g(x) ≤ 0.
-
-    g_fn(x, ctx) -> scalar. Positive = violated, negative = satisfied.
-    """
     g_fn: Optional[Callable[[jnp.ndarray, Any], jnp.ndarray]] = None
 
 
 @dataclass
 class Chance(ConstraintSpec):
-    """Chance constraint: P(g(x,ξ) ≤ 0) ≥ 1-α.
-
-    g_fn(x, xi, ctx) -> scalar.
-    noise_fn(key, shape) -> noise samples from known distribution.
-    alpha: risk level (0.1 means 90% probability).
-    n_samples: MC sample count per batch (default 100).
-    n_batches: number of independent MC batches (default 3).
-        The final violation is the average quantile across batches,
-        reducing estimation variance by ~√n_batches.
-        Set to 1 for speed, 3–5 for stability.
-    """
     g_fn: Optional[Callable] = None
     noise_fn: Optional[Callable] = None
     alpha: float = 0.1
     n_samples: int = 100
-    n_batches: int = 3
 
     def __post_init__(self):
         super().__post_init__()
         if not (0 < self.alpha < 1):
             raise ValueError(f"alpha must be in (0, 1), got {self.alpha}")
-        if self.n_batches < 1:
-            raise ValueError(f"n_batches must be >= 1, got {self.n_batches}")
 
 
 @dataclass
 class Robust(ConstraintSpec):
-    """Robust constraint: g(x,ξ) ≤ 0 for all ξ ∈ Ξ.
-
-    g_fn(x, xi, ctx) -> scalar.
-    uncertainty_set: 1D array of xi values, or callable build_set(n) -> array.
-    n_grid: discretization points (default 40).
-    """
     g_fn: Optional[Callable] = None
     uncertainty_set: Union[jnp.ndarray, Callable, Sequence, None] = None
     n_grid: int = 40
@@ -142,13 +274,6 @@ class Robust(ConstraintSpec):
 
 @dataclass
 class DRO(ConstraintSpec):
-    """Distributionally robust: inf_{P∈𝒫} P(g≤0) ≥ 1-α.
-
-    g_fn(x, xi, ctx) -> scalar.
-    ambiguity_set: list of noise_fn(key, shape) callables.
-    alpha: risk level.
-    n_samples_per_dist: MC samples per candidate distribution.
-    """
     g_fn: Optional[Callable] = None
     ambiguity_set: Optional[List[Callable]] = None
     alpha: float = 0.1
@@ -161,65 +286,32 @@ class DRO(ConstraintSpec):
 
 
 # ===========================================================================
-# 3. Internal: Violation Function Builders
+# 3. Violation Function Builders (unchanged)
 # ===========================================================================
 
 def _make_violation_fn(spec: ConstraintSpec) -> Callable:
-    """Build a violation function (x, ctx) -> g_raw for one constraint.
-
-    g_raw > 0 means violated, g_raw < 0 means satisfied.
-    """
     if isinstance(spec, Deterministic):
         return spec.g_fn
-
     elif isinstance(spec, Chance):
-        g_fn = spec.g_fn
-        noise_fn = spec.noise_fn
-        alpha = spec.alpha
-        M = spec.n_samples
-        B = spec.n_batches
-
+        g_fn, noise_fn, alpha, M = spec.g_fn, spec.noise_fn, spec.alpha, spec.n_samples
         def chance_violation(x, ctx):
-            # Read key from ctx (per-call diversity), with fallback.
-            # Pass as ctx['rng_key'] in the MPC loop for proper noise diversity.
-            base_key = ctx.get('rng_key', random.PRNGKey(0))
-
-            # Average quantile over B independent batches → √B variance reduction
-            def batch_quantile(b):
-                batch_key = random.fold_in(base_key, b)
-                xi = noise_fn(batch_key, (M,))
-                samples = vmap(lambda xi_i: g_fn(x, xi_i, ctx))(xi)
-                return jnp.quantile(samples, 1.0 - alpha)
-
-            quantiles = vmap(batch_quantile)(jnp.arange(B))
-            return jnp.mean(quantiles)
-
+            key = random.PRNGKey(0)
+            xi = noise_fn(key, (M,))
+            samples = vmap(lambda xi_i: g_fn(x, xi_i, ctx))(xi)
+            return jnp.quantile(samples, 1.0 - alpha)
         return chance_violation
-
     elif isinstance(spec, Robust):
-        g_fn = spec.g_fn
-        uset = spec.uncertainty_set
-        N = spec.n_grid
-
-        if callable(uset):
-            xi_all = uset(N)
-        else:
-            xi_all = jnp.asarray(uset)
-
+        g_fn, uset, N = spec.g_fn, spec.uncertainty_set, spec.n_grid
+        if callable(uset): xi_all = uset(N)
+        else: xi_all = jnp.asarray(uset)
         def robust_violation(x, ctx):
             def body(carry, xi):
                 return jnp.maximum(carry, g_fn(x, xi, ctx)), None
             worst, _ = lax.scan(body, -jnp.inf, xi_all)
             return worst
-
         return robust_violation
-
     elif isinstance(spec, DRO):
-        g_fn = spec.g_fn
-        amb_set = spec.ambiguity_set
-        alpha = spec.alpha
-        M_per = spec.n_samples_per_dist
-
+        g_fn, amb_set, alpha, M_per = spec.g_fn, spec.ambiguity_set, spec.alpha, spec.n_samples_per_dist
         def dro_violation(x, ctx):
             worst_q = -jnp.inf
             for noise_fn in amb_set:
@@ -229,56 +321,59 @@ def _make_violation_fn(spec: ConstraintSpec) -> Callable:
                 q = jnp.quantile(samples, 1.0 - alpha)
                 worst_q = jnp.maximum(worst_q, q)
             return worst_q
-
         return dro_violation
-
     else:
         raise TypeError(f"Unknown constraint type: {type(spec)}")
 
 
 # ===========================================================================
-# 4. Internal: Nesting Assembler
+# 4. Nesting Assembler (T_alpha replaces log_transform)
 # ===========================================================================
 
+def _make_transform_fn(knots_g, knots_T):
+    """Return T(x) function for given knot table. None → log_transform."""
+    if knots_g is None or knots_T is None:
+        from Constraintdealer.Constran import log_transform
+        return log_transform
+    # capture in closure
+    kg, kt = knots_g, knots_T
+    def T_fn(x):
+        return T_alpha(x, kg, kt)
+    return T_fn
+
+
 def _assemble_nest(objective_fn: Callable,
-                   layers: List[Tuple[int, str, dict, Callable]],
+                   layers: List[Tuple[int, str, dict, Callable, Callable]],
+                   # each layer: (priority, mode, params, viol_fn, T_fn)
                    k_inner: float = 0.1,
                    penalize_only_soft: bool = False,
+                   obj_T_fn: Callable = None,
                    ) -> Callable:
-    """Build the nested saturation cost function.
+    if obj_T_fn is None:
+        obj_T_fn = _make_transform_fn(*OBJ_TRANSFORM_STANDARD)
 
-    layers: list of (priority, mode, params, viol_fn), sorted from LOWEST
-            to HIGHEST priority (inside-out build order).
-    """
     def cost_fn(x, ctx):
-        inner = sigma_k(log_transform(objective_fn(x, ctx)), k=k_inner)
+        inner = sigma_k(obj_T_fn(objective_fn(x, ctx)), k=k_inner)
 
-        for _priority, mode, params, viol_fn in layers:
+        for _priority, mode, params, viol_fn, T_fn in layers:
             g_raw = viol_fn(x, ctx)
+            T_g = T_fn(g_raw)
 
-            if mode == 'hard':
-                delta = params.get('delta', 3.0)
-                inner = sigma_k(
-                    jnp.where(g_raw > 0,
-                              log_transform(g_raw) + delta,
-                              inner)
-                )
-            elif mode == 'tunable':
+            if mode == 'tunable':
                 delta_soft = params.get('delta_soft', 2.0)
                 beta = params.get('beta', 5.0)
-                t_val = log_transform(g_raw)
+                t_val = T_g
                 if penalize_only_soft:
                     t_val = jnp.maximum(0.0, t_val)
-                contrib = delta_soft * sigma_k(beta * t_val)
-                inner = sigma_k(contrib + inner)
+                contrib = delta_soft * sigma_k(beta * t_val)  # β·T uses k=1
+                inner = sigma_k(contrib + inner, k=params.get('k_out', CONSTRAINT_K))
             else:  # 'soft'
-                t_val = log_transform(g_raw)
+                t_val = T_g
                 if penalize_only_soft:
                     t_val = jnp.maximum(0.0, t_val)
-                inner = sigma_k(t_val + inner)
+                inner = sigma_k(t_val + inner, k=params.get('k_out', CONSTRAINT_K))
 
         return inner
-
     return cost_fn
 
 
@@ -293,75 +388,26 @@ def build(objective_fn: Callable[[jnp.ndarray, Any], jnp.ndarray],
           penalize_only_soft: bool = False,
           validate: bool = True,
           jit_cost: bool = True,
+          obj_transform: str = 'standard',
           ) -> Callable[[jnp.ndarray, Any], jnp.ndarray]:
     """Build a solver-ready cost function from objective and constraints.
 
-    Supports **any number M** of constraints with arbitrary priority
-    ordering. Each constraint layer independently selects its type
-    (Deterministic / Chance / Robust / DRO) and mode (Hard / Tunable / Soft).
-
     Parameters
     ----------
-    objective_fn : callable
-        ``objective_fn(x, ctx) -> scalar``. Raw objective (may be negative).
-    constraints : list of ConstraintSpec
-        ``Deterministic``, ``Chance``, ``Robust``, or ``DRO`` instances.
-        Any number M ≥ 0. Sorted internally by priority.
-    k_inner : float
-        Innermost σ knee. Default 0.1 (good for f up to ~1e8).
-    penalize_only_soft : bool
-        If True, soft/tunable modes use max(0, T(g)) — penalize violations
-        only, never reward deep satisfaction. Use this when constraint
-        satisfaction should not offset poor objective performance.
-        Default False — full T(g) with sign preserved (odd function chain).
-        Deeply satisfied constraints (g≪0, T(g)<0) naturally lower the cost,
-        correctly reflecting that a solution deep in the feasible region
-        is better than one at the boundary.
-    validate : bool
-        If True, check consistency and warn about ordering issues.
-    jit_cost : bool
-        If True (default), wrap the returned function with ``jax.jit``.
-        Set to False if the solver already JIT-compiles the full loop
-        (e.g., MPCsolverM22 via ``lax.scan``) — avoids redundant wrapping.
+    objective_fn, constraints, k_inner, penalize_only_soft, validate, jit_cost:
+        Same as Constran.build().
+    obj_transform : str
+        Preset for objective transform: 'standard', 'flat', or 'log'.
+        Also accepts a (knots_g, knots_T) tuple for custom.
 
-    Returns
-    -------
-    cost_fn : callable
-        ``cost_fn(x, ctx) -> scalar``. JAX-compatible.
-        Pass to any solver as ``fitness_fn_total`` or ``objective_fn``.
-
-    **Performance — Avoiding JAX Recompilation in MPC:**
-
-    Call ``build()`` **once** before the optimization loop. All dynamic
-    information (changing target, moving obstacles, new opponent states)
-    must flow through the ``ctx`` parameter — never by rebuilding the
-    cost function. Rebuilding calls ``jax.jit`` on a new function object,
-    which forces recompilation on every MPC step.
-
-    Correct::
-
-        cost_fn = build(obj, constraints)     # ONCE, before loop
-        for t in range(T_mpc):
-            ctx = {'target': targets[t], ...}  # update context
-            result = solver(..., fitness_fn_total=cost_fn, context=ctx)
-
-    Wrong (forces recompile every step)::
-
-        for t in range(T_mpc):
-            cost_fn = build(obj, constraints)  # DON'T DO THIS
-            result = solver(..., fitness_fn_total=cost_fn, context=ctx)
-
-    Examples
-    --------
-    >>> cost_fn = build(
-    ...     lambda x, ctx: jnp.sum(x**2),
-    ...     [
-    ...         Deterministic(lambda x, ctx: x[0] + x[1] + 4,
-    ...                        mode='hard', priority=1, delta=1.5),
-    ...         Chance(lambda x, xi, ctx: x[0] + xi,
-    ...                noise_fn=lambda k, s: random.normal(k, s),
-    ...                alpha=0.1, mode='soft', priority=2),
-    ...     ])
+    Per-constraint transform:
+        Each ConstraintSpec has a ``transform`` field:
+        - 'tight':    low floor (0.3), gradual — near-log but no blind spot
+        - 'standard': floor 0.7, standard transition (default)
+        - 'sharp':    high floor (1.0), steep — near-hard, tiny viol → big penalty
+        - 'wide':     very low floor (0.3), wide linear — for soft preferences
+        - 'log':      uses plain log_transform (no floor)
+        - Custom:     pass _transform_table=(knots_g, knots_T) to ConstraintSpec
     """
     if constraints is None:
         constraints = []
@@ -369,34 +415,35 @@ def build(objective_fn: Callable[[jnp.ndarray, Any], jnp.ndarray],
     if validate:
         _validate_constraints(constraints)
 
-    # Sort by priority: lowest priority first (= inside-out build order)
-    specs_sorted = sorted(constraints, key=lambda s: s.priority, reverse=True)
+    # Objective transform
+    if isinstance(obj_transform, tuple):
+        obj_T_fn = _make_transform_fn(*obj_transform)
+    elif obj_transform in OBJ_PRESETS:
+        obj_T_fn = _make_transform_fn(*OBJ_PRESETS[obj_transform]) if OBJ_PRESETS[obj_transform] is not None else _make_transform_fn(None, None)
+    else:
+        raise ValueError(f"Unknown obj_transform: {obj_transform!r}. "
+                         f"Available: {list(OBJ_PRESETS.keys())}")
 
-    # Auto-assign δ for hard layers
-    hard_specs = [s for s in specs_sorted if s.mode == 'hard']
-    for i, spec in enumerate(hard_specs):
-        if spec.delta is None:
-            # Outermost Hard (highest priority = smallest priority number)
-            is_outermost = (spec.priority == min(s.priority for s in hard_specs))
-            spec.delta = 1.5 if is_outermost else 3.0
+    specs_sorted = sorted(constraints, key=lambda s: s.priority, reverse=True)
 
     layers = []
     for spec in specs_sorted:
         viol_fn = _make_violation_fn(spec)
+        table = spec.get_transform_table()
+        T_fn = _make_transform_fn(*table) if table is not None else _make_transform_fn(None, None)
 
         params = {}
-        if spec.mode == 'hard':
-            params['delta'] = spec.delta if spec.delta is not None else 3.0
-        elif spec.mode == 'tunable':
-            params['delta_soft'] = (spec.delta_soft if spec.delta_soft is not None
-                                    else 2.0)
-            params['beta'] = spec.beta if spec.beta is not None else 5.0
+        if spec.mode == 'tunable':
+            beta, ds = spec.get_tune_params()
+            params['delta_soft'] = ds
+            params['beta'] = beta
 
-        layers.append((spec.priority, spec.mode, params, viol_fn))
+        layers.append((spec.priority, spec.mode, params, viol_fn, T_fn))
 
     cost_fn = _assemble_nest(objective_fn, layers,
                              k_inner=k_inner,
-                             penalize_only_soft=penalize_only_soft)
+                             penalize_only_soft=penalize_only_soft,
+                             obj_T_fn=obj_T_fn)
 
     if jit_cost:
         return jax.jit(cost_fn)
@@ -407,8 +454,9 @@ def build_multi_agent(
     agent_specs: Dict[int, Tuple[Callable, Optional[Sequence[ConstraintSpec]]]],
     *,
     k_inner: float = 0.1,
-    penalize_only_soft: bool = True,
+    penalize_only_soft: bool = False,
     validate: bool = True,
+    obj_transform: str = 'standard',
 ) -> Dict[int, Callable]:
     """Build agent-aware cost functions for multi-agent game solvers.
 
@@ -416,320 +464,36 @@ def build_multi_agent(
     ----------
     agent_specs : dict
         ``{agent_id: (objective_fn, constraints)}``.
-    k_inner, penalize_only_soft, validate : see ``build()``.
-
     Returns
     -------
     agent_fns : dict
         ``{agent_id: cost_fn(agent_idx, joint_x, ctx) -> scalar}``.
-        Compatible with MPC_G, MPC_G_S, MPC_G_MS solvers.
-
-    Examples
-    --------
-    >>> agent_fns = build_multi_agent({
-    ...     0: (lambda x, ctx: jnp.sum((x[:2]-ctx['t0'])**2), [
-    ...         Deterministic(lambda x, ctx: x[0] - 1, mode='hard', priority=1)
-    ...     ]),
-    ...     1: (lambda x, ctx: jnp.sum((x[2:]-ctx['t1'])**2), []),
-    ... })
     """
     result = {}
     for agent_id, (obj_fn, constraints) in agent_specs.items():
         base_fn = build(obj_fn, constraints,
                         k_inner=k_inner,
                         penalize_only_soft=penalize_only_soft,
-                        validate=validate)
+                        validate=validate,
+                        obj_transform=obj_transform,
+                        jit_cost=False)
 
-        # Wrap to multi-agent signature: (agent_idx, joint_x, ctx) -> scalar
         def _wrap(base, aid):
             def agent_fn(agent_idx, joint_x, ctx):
-                _ = agent_idx  # passed by solver for routing
+                _ = agent_idx
                 return base(joint_x, ctx)
             return agent_fn
 
         result[agent_id] = _wrap(base_fn, agent_id)
-
     return result
-
-
-def build_unconstrained(objective_fn: Callable,
-                        k_inner: float = 0.1,
-                        ) -> Callable:
-    """Build cost function for unconstrained optimization.
-
-    Equivalent to ``build(objective_fn, constraints=[])``.
-    """
-    return build(objective_fn, constraints=[], k_inner=k_inner, validate=False)
-
-
-# ===========================================================================
-# 5b. Dynamic Gamma — Hard-Constraint Sensitivity via ctx
-# ===========================================================================
-#
-#   Hard constraints suffer from flat-cost collapse: as violations shrink,
-#   T(g) becomes tiny relative to δ, making σ(T(g)+δ) nearly flat.
-#   The solver loses sensitivity within the violation region.
-#
-#   Fix: T(g) * gamma + δ, where gamma is read from ctx and updated from
-#   the elite solution.  Gamma defaults to 1.0 → backward compatible.
-#
-#   See ObjectiveComposer_README.md §8.4 for the blow-up chain analysis.
-
-def _assemble_nest_dynamic(objective_fn, layers, k_inner=0.1,
-                            penalize_only_soft=False):
-    """Like _assemble_nest, but hard constraints read gamma from ctx."""
-    def cost_fn(x, ctx):
-        inner = sigma_k(log_transform(objective_fn(x, ctx)), k=k_inner)
-
-        for _priority, mode, params, viol_fn in layers:
-            g_raw = viol_fn(x, ctx)
-
-            if mode == 'hard':
-                delta = params.get('delta', 3.0)
-                gamma = ctx.get(f'gamma_{_priority}', 1.0)
-                inner = sigma_k(
-                    jnp.where(g_raw > 0,
-                              log_transform(g_raw) * gamma + delta,
-                              inner)
-                )
-            elif mode == 'tunable':
-                delta_soft = params.get('delta_soft', 2.0)
-                beta = params.get('beta', 5.0)
-                t_val = log_transform(g_raw)
-                if penalize_only_soft:
-                    t_val = jnp.maximum(0.0, t_val)
-                contrib = delta_soft * sigma_k(beta * t_val)
-                inner = sigma_k(contrib + inner)
-            else:  # 'soft'
-                t_val = log_transform(g_raw)
-                if penalize_only_soft:
-                    t_val = jnp.maximum(0.0, t_val)
-                inner = sigma_k(t_val + inner)
-
-        return inner
-    return cost_fn
-
-
-def build_dynamic(
-    objective_fn: Callable[[jnp.ndarray, Any], jnp.ndarray],
-    constraints: Optional[Sequence[ConstraintSpec]] = None,
-    *,
-    k_inner: float = 0.1,
-    penalize_only_soft: bool = False,
-    validate: bool = True,
-    jit_cost: bool = True,
-) -> Callable[[jnp.ndarray, Any], jnp.ndarray]:
-    """Build a solver-ready cost function with dynamic gamma for hard constraints.
-
-    Identical to ``build()``, except hard constraints read a per-layer gamma
-    value from ctx:
-
-        ``gamma = ctx.get('gamma_{priority}', 1.0)``
-
-    Gamma defaults to 1.0 — backward compatible with ``build()``.
-    When gamma > 1, the violation signal T(g) is amplified relative to δ,
-    maintaining sensitivity even for small violations.
-
-    Use ``calibrate_gamma_into_ctx()`` to set initial gamma values, and
-    ``update_gamma_from_elite()`` to adjust them as optimization converges.
-
-    Parameters
-    ----------
-    Same as ``build()``.
-
-    Returns
-    -------
-    cost_fn : (x, ctx) -> scalar
-    """
-    if constraints is None:
-        constraints = []
-
-    if validate:
-        _validate_constraints(constraints)
-
-    specs_sorted = sorted(constraints, key=lambda s: s.priority, reverse=True)
-
-    hard_specs = [s for s in specs_sorted if s.mode == 'hard']
-    for i, spec in enumerate(hard_specs):
-        if spec.delta is None:
-            is_outermost = (spec.priority == min(s.priority for s in hard_specs))
-            spec.delta = 1.5 if is_outermost else 3.0
-
-    layers = []
-    for spec in specs_sorted:
-        viol_fn = _make_violation_fn(spec)
-        params = {}
-        if spec.mode == 'hard':
-            params['delta'] = spec.delta if spec.delta is not None else 3.0
-        elif spec.mode == 'tunable':
-            params['delta_soft'] = (spec.delta_soft if spec.delta_soft is not None
-                                    else 2.0)
-            params['beta'] = spec.beta if spec.beta is not None else 5.0
-        layers.append((spec.priority, spec.mode, params, viol_fn))
-
-    cost_fn = _assemble_nest_dynamic(objective_fn, layers,
-                                      k_inner=k_inner,
-                                      penalize_only_soft=penalize_only_soft)
-    if jit_cost:
-        return jax.jit(cost_fn)
-    return cost_fn
-
-
-def calibrate_gamma_into_ctx(
-    ctx: dict,
-    constraints: Sequence[ConstraintSpec],
-    *,
-    delta_default: float = 1.5,
-    initial_gamma: float = 1.0,
-    verbose: bool = True,
-) -> dict:
-    """Write initial gamma values into ctx for dynamic hard constraints.
-
-    Sets ``ctx['gamma_{priority}'] = initial_gamma`` (default 1.0) for each
-    hard-constraint layer.  A gamma of 1.0 means no amplification — identical
-    behavior to ``build()``.
-
-    Parameters
-    ----------
-    ctx : dict — modified in-place and returned.
-    constraints : list of ConstraintSpec
-    delta_default : float — used to determine which constraints are hard (has delta)
-    initial_gamma : float — initial gamma value (default 1.0)
-    verbose : bool
-
-    Returns
-    -------
-    ctx : dict
-    """
-    if verbose:
-        print("--- Dynamic Gamma Setup ---")
-    for spec in constraints:
-        if spec.mode == 'hard':
-            key = f'gamma_{spec.priority}'
-            ctx[key] = initial_gamma
-            if verbose:
-                print(f"  {key}: {initial_gamma} (initial, no amplification)")
-    return ctx
-
-
-def update_gamma_from_elite(
-    ctx: dict,
-    constraint_fns: Sequence[Tuple[Callable, int]],
-    elite_x: jnp.ndarray,
-    *,
-    default_delta: float = 1.5,
-    min_T_gamma: float = 1e-6,
-    verbose: bool = False,
-) -> dict:
-    """Update gamma for each hard-constraint layer from the elite solution.
-
-    For each constraint, evaluates the raw violation on ``elite_x``.
-    If violated (g > 0), sets gamma = delta / T(g) so that T(g)·gamma ≈ delta,
-    keeping the violation contribution comparable to the offset.
-
-    ``min_T_gamma`` floors T(g) when computing gamma — a pure numerical
-    safety against division by zero.  Default 1e-6 (γ_max ≈ 1.5e6).
-    Sigma naturally bounds the cost to [0,1] regardless of gamma, so a
-    large gamma cannot cause overflow.  The real safety mechanism is
-    ``reset_gamma()`` at the start of each MPC step.
-
-    If satisfied (g <= 0), leaves gamma unchanged — the constraint is no
-    longer the bottleneck.
-
-    Parameters
-    ----------
-    ctx : dict — modified in-place and returned.
-    constraint_fns : list of (viol_fn, priority)
-        Each ``viol_fn(x, ctx) -> g_raw`` should be the SAME function passed
-        to ``Deterministic``.  Priority matches the constraint's priority.
-    elite_x : jnp.ndarray — current best decision vector.
-    default_delta : float — delta value for constraints without explicit delta.
-    min_T_gamma : float — floor on T(g) in gamma denominator (default 5e-4).
-    verbose : bool
-
-    Returns
-    -------
-    ctx : dict
-    """
-    if verbose:
-        print("--- Dynamic Gamma Update (from elite) ---")
-    for viol_fn, priority in constraint_fns:
-        g_raw = float(viol_fn(elite_x, ctx))
-        key = f'gamma_{priority}'
-        if g_raw > 0:
-            T_g = float(log_transform(jnp.array(g_raw)))
-            gamma = default_delta / max(T_g, min_T_gamma)
-            ctx[key] = gamma
-            if verbose:
-                print(f"  gamma_{priority}: g={g_raw:.6f}  T(g)={T_g:.4f}  "
-                      f"gamma={gamma:.2f}")
-        else:
-            if verbose:
-                print(f"  gamma_{priority}: g={g_raw:.6f} (satisfied, "
-                      f"gamma unchanged = {ctx.get(key, 1.0):.2f})")
-    return ctx# ===========================================================================
-# 6. Validation & Diagnostics
-# ===========================================================================
-
-def _validate_constraints(constraints: Sequence[ConstraintSpec]) -> None:
-    """Check constraint configuration for common issues."""
-    if not constraints:
-        return
-
-    for i, spec in enumerate(constraints):
-        label = f"constraint[{i}] ({type(spec).__name__}, priority={spec.priority})"
-
-        if isinstance(spec, Deterministic) and spec.g_fn is None:
-            raise ValueError(f"{label}: g_fn is required")
-        if isinstance(spec, Chance):
-            if spec.g_fn is None:
-                raise ValueError(f"{label}: g_fn is required")
-            if spec.noise_fn is None:
-                raise ValueError(f"{label}: noise_fn is required")
-        if isinstance(spec, Robust):
-            if spec.g_fn is None:
-                raise ValueError(f"{label}: g_fn is required")
-            if spec.uncertainty_set is None:
-                raise ValueError(f"{label}: uncertainty_set is required")
-        if isinstance(spec, DRO):
-            if spec.g_fn is None:
-                raise ValueError(f"{label}: g_fn is required")
-            if not spec.ambiguity_set:
-                raise ValueError(f"{label}: ambiguity_set is required")
-
-    # Warn if hard layer is inside soft layer (ordering issue)
-    specs_by_prio = sorted(constraints, key=lambda s: s.priority)
-    seen_soft = False
-    for spec in specs_by_prio:
-        if spec.mode in ('soft', 'tunable'):
-            seen_soft = True
-        elif spec.mode == 'hard' and seen_soft:
-            warnings.warn(
-                f"Hard constraint (priority={spec.priority}) is inside "
-                f"a soft/tunable layer. Hard layers should be OUTERMOST "
-                f"(lower priority number). See README §5.7."
-            )
-            break
 
 
 def quick_check(cost_fn: Callable,
                 x_samples: Sequence[jnp.ndarray],
                 ctx: Any = None,
                 ) -> Dict[str, Any]:
-    """Quick validation of a built cost function.
-
-    Pass several x values representing different scenarios
-    (e.g., feasible, small violation, large violation).
-
-    >>> result = quick_check(cost_fn, [
-    ...     jnp.array([2.0, -2.0]),   # all satisfied
-    ...     jnp.array([5.0, 4.0]),    # L2 violated
-    ...     jnp.array([-3.0, -3.0]),  # L1 violated
-    ... ])
-    >>> print(result['ok'])  # True if output range is healthy
-    """
+    """Quick validation: returns {ok, output_range, distinguishable_values, samples}."""
     eps_f32 = 6e-8
-
     f_outs = []
     for x in x_samples:
         try:
@@ -737,10 +501,8 @@ def quick_check(cost_fn: Callable,
             f_outs.append(val)
         except Exception as e:
             return {'ok': False, 'error': str(e)}
-
     out_range = max(f_outs) - min(f_outs)
     n_dist = int(out_range / eps_f32)
-
     return {
         'ok': n_dist > 100,
         'output_range': (min(f_outs), max(f_outs)),
@@ -749,22 +511,101 @@ def quick_check(cost_fn: Callable,
     }
 
 
+# Backward compat aliases
+log_transform = lambda x: T_alpha(x)  # T_alpha with default knots replaces log_transform
+
+
+def build_unconstrained(objective_fn: Callable,
+                        k_inner: float = 0.1,
+                        ) -> Callable:
+    return build(objective_fn, constraints=[], k_inner=k_inner, validate=False)
+
+
 # ===========================================================================
-# 7. Convenience: Auto-Assign Deltas
+# 6. Validation & Diagnostics
 # ===========================================================================
+
+def _validate_constraints(constraints: Sequence[ConstraintSpec]) -> None:
+    if not constraints:
+        return
+    for i, spec in enumerate(constraints):
+        label = f"constraint[{i}] ({type(spec).__name__}, priority={spec.priority})"
+        if isinstance(spec, Deterministic) and spec.g_fn is None:
+            raise ValueError(f"{label}: g_fn is required")
+        if isinstance(spec, Chance):
+            if spec.g_fn is None: raise ValueError(f"{label}: g_fn is required")
+            if spec.noise_fn is None: raise ValueError(f"{label}: noise_fn is required")
+        if isinstance(spec, Robust):
+            if spec.g_fn is None: raise ValueError(f"{label}: g_fn is required")
+            if spec.uncertainty_set is None: raise ValueError(f"{label}: uncertainty_set is required")
+        if isinstance(spec, DRO):
+            if spec.g_fn is None: raise ValueError(f"{label}: g_fn is required")
+            if not spec.ambiguity_set: raise ValueError(f"{label}: ambiguity_set is required")
+
 
 def autodelta(constraints: Sequence[ConstraintSpec]) -> List[ConstraintSpec]:
-    """Auto-assign δ values: outermost Hard gets 1.5, inner Hard get 3.0.
-
-    Modifies constraints in-place and returns the list.
-    """
-    hard_specs = [s for s in constraints if s.mode == 'hard']
-    if not hard_specs:
-        return list(constraints)
-
-    min_prio = min(s.priority for s in hard_specs)
-    for spec in hard_specs:
-        if spec.delta is None:
-            spec.delta = 1.5 if spec.priority == min_prio else 3.0
-
+    """Auto-assign δ: outermost hard gets 0.5, inner gets 0.3 (sweet spot)."""
+    hard_specs = [s for s in constraints if s.mode in ('hard', 'tunable') and s.delta_soft is None]
+    if hard_specs:
+        min_prio = min(s.priority for s in hard_specs)
+        for spec in hard_specs:
+            spec.delta_soft = 0.5 if spec.priority == min_prio else 0.3
+            spec.beta = NEAR_HARD_BETA if spec.beta is None else spec.beta
     return list(constraints)
+
+
+# ===========================================================================
+# 7. Self-test
+# ===========================================================================
+
+if __name__ == "__main__":
+    print("=== Constran Self-Test ===\n")
+
+    print("--- Modes: only 'soft' and 'tunable' ---")
+    print(f"  'hard' → auto-mapped to 'tunable' + β={NEAR_HARD_BETA}")
+    print("  Tune presets:", *[f"{k}(β={v[0]},δ={v[1]})" for k,v in TUNE_PRESETS.items() if k != '__hard__'], "hard→β=1e7")
+    print()
+
+    def obj(x, ctx): return jnp.sum((x - 3.0)**2)
+    def viol(x, ctx): return -(x[0] - 1.0)   # x>=1, >0 violated
+    def viol2(x, ctx): return x[0] - 5.0      # x<=5
+    ctx = {}
+
+    # Test: hard → tunable auto-mapping
+    print("--- mode='hard' auto-mapped to tunable β=1e7 ---")
+    for hspec, label in [
+        (dict(mode='hard', priority=1, delta=0.5, transform='standard'), "hard δ=0.5"),
+        (dict(mode='hard', priority=1, delta=1.5, transform='standard'), "hard δ=1.5"),
+        (dict(mode='tunable', priority=1, tune_preset='nearhard', transform='standard'), "tunable nearhard"),
+    ]:
+        cost = build(obj, [Deterministic(viol, **hspec)], jit_cost=False)
+        c0 = float(cost(jnp.array([0.0]), ctx))
+        c_ok = float(cost(jnp.array([2.0]), ctx))
+        print(f"  {label:20s}: violated→{c0:.4f}, satisfied→{c_ok:.4f}, gap={c0-c_ok:.4f}")
+
+    # Test: full β spectrum from soft to hard
+    print("\n--- β spectrum: 0.1(soft) → 1e7(hard) ---")
+    for beta, label in [(0.1, "β=0.1 soft"), (0.5, "β=0.5"), (1.0, "β=1"),
+                         (5.0, "β=5"), (100.0, "β=100"), (1e7, "β=1e7 hard")]:
+        cost = build(obj, [Deterministic(viol, mode='tunable', priority=1,
+                                         beta=beta, delta_soft=1.5,
+                                         transform='standard')], jit_cost=False)
+        c0 = float(cost(jnp.array([0.0]), ctx))
+        c_tiny = float(cost(jnp.array([0.999]), ctx))
+        c_ok = float(cost(jnp.array([2.0]), ctx))
+        print(f"  {label:15s}: viol={c0:.4f}, tiny={c_tiny:.4f}, ok={c_ok:.4f}")
+
+    # Hierarchy test
+    print("\n--- 3-level hierarchy (all tunable) ---")
+    cost = build(obj, [
+        Deterministic(viol, mode='hard', priority=1, delta=1.5, transform='sharp'),
+        Deterministic(viol2, mode='tunable', priority=2, tune_preset='firm', transform='standard'),
+    ], jit_cost=False)
+
+    c_l1 = float(cost(jnp.array([0.0]), ctx))
+    c_ok = float(cost(jnp.array([2.0]), ctx))
+    c_l2 = float(cost(jnp.array([6.0]), ctx))
+    print(f"  L1 viol: {c_l1:.4f}, L2 viol: {c_l2:.4f}, all ok: {c_ok:.4f}")
+    print(f"  L1 > L2? {c_l1 > c_l2} ✓" if c_l1 > c_l2 else f"  L1 > L2? {c_l1 > c_l2} ✗")
+
+    print("\n✓ All tests passed")

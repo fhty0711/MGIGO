@@ -29,6 +29,10 @@ from jax import random, lax, jit, vmap
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gmm_igo.MPCsolverM22 import mmog_igo_optimizer_mpc
 from Constraintdealer.Constran import build, Deterministic
+from Constraintdealer.ObjectiveComposer import (
+    compose_objective_dynamic, compose_objective_adaptive,
+    calibrate_k_into_ctx, update_k_from_elite, knee_to_k
+)
 
 
 # ======================================================================
@@ -509,6 +513,95 @@ def mpc_cost_fn_constran(z_flat, ctx):
     return _base_hybrid_cost(z_flat, ext_ctx)
 
 
+# ======================================================================
+# 5d. Composed mode: dynamic k objective + constraint build
+#
+#     Objective sub-terms get per-term dynamic k (auto-calibrated from elite),
+#     constraints get declarative build().  Zero manual weights.
+# ======================================================================
+
+# --- Sub-term functions (read trajectory from ctx['traj']) ---
+def _tracking_term(z_flat, ctx):
+    positions = ctx['traj'][:, :2]
+    target = ctx['target']
+    return jnp.sum(jnp.sum((positions - target)**2, axis=1))
+
+def _final_term(z_flat, ctx):
+    final_state = ctx['final_state']
+    target = ctx['target']
+    return 15.0 * jnp.sum((final_state[:2] - target)**2)
+
+def _control_term(z_flat, ctx):
+    H = z_flat.shape[0] // 2
+    u_max = CONFIG['max_force']
+    fx = u_max * jnp.tanh(z_flat[:H])
+    fy = u_max * jnp.tanh(z_flat[H:2*H])
+    return 0.1 * (jnp.sum(fx**2) + jnp.sum(fy**2))
+
+# --- Calibration-only term functions (self-contained, do their own rollout) ---
+def _tracking_calib(z_flat, ctx):
+    H = z_flat.shape[0] // 2
+    traj, _, _ = _rollout(z_flat[:H], z_flat[H:2*H],
+                          ctx['init_state'], jnp.array(CONFIG['dt']), H)
+    return jnp.sum(jnp.sum((traj[:,:2] - ctx['target'])**2, axis=1))
+
+def _final_calib(z_flat, ctx):
+    H = z_flat.shape[0] // 2
+    _, fs, _ = _rollout(z_flat[:H], z_flat[H:2*H],
+                        ctx['init_state'], jnp.array(CONFIG['dt']), H)
+    return 15.0 * jnp.sum((fs[:2] - ctx['target'])**2)
+
+def _control_calib(z_flat, ctx):
+    H = z_flat.shape[0] // 2
+    u_max = CONFIG['max_force']
+    return 0.1 * (jnp.sum((u_max * jnp.tanh(z_flat[:H]))**2) +
+                  jnp.sum((u_max * jnp.tanh(z_flat[H:2*H]))**2))
+
+# Dynamic k objective — raw_output=True: no outer σ, build() handles compression
+_composed_obj = compose_objective_dynamic([
+    (_tracking_term, 0.0, 'tracking'),
+    (_final_term,    0.0, 'final'),
+    (_control_term,  0.0, 'control'),
+], raw_output=True)
+
+# Initial k: physically meaningful knees, then per-step elite updates refine them
+_composed_ctx = {'target': jnp.array(CONFIG['target']),
+                 'init_state': jnp.array([0.5, 0.5, 0.0, 0.0])}
+_composed_ctx['k_tracking'] = float(knee_to_k(20.0))   # knee at ~20 tracking error
+_composed_ctx['k_final']    = float(knee_to_k(3.0))    # knee at ~3 final error
+_composed_ctx['k_control']  = float(knee_to_k(1.5))    # knee at ~1.5 control cost
+
+# Constraints use build() with large k_inner — composed objective is already
+# per-term compressed, so the inner sigma_k should be nearly linear (knee wide).
+_composed_cost_base = build(
+    lambda z, ctx: _composed_obj(z, ctx),
+    [
+        Deterministic(_static_violation, mode='hard', priority=1),
+        Deterministic(_dynamic_violation, mode='hard', priority=2),
+    ],
+    k_inner=1.0,   # transparent for pre-compressed objective (sum in [0.5, 3])
+    jit_cost=False,
+)
+
+@jit
+def mpc_cost_fn_composed(z_flat, ctx):
+    (init_state, target, dt_val, _,
+     ped1_traj, ped1_r, ped1_sigma, mc_key) = ctx
+    H = z_flat.shape[0] // 2
+    theta_x = z_flat[:H]
+    theta_y = z_flat[H:2*H]
+    traj, final_state, _ = _rollout(theta_x, theta_y, init_state, dt_val, H)
+
+    ext_ctx = {
+        'traj': traj, 'final_state': final_state, 'target': target,
+        'ped_traj': ped1_traj, 'ped_r': ped1_r, 'ped_sigma': ped1_sigma,
+        'mc_key': mc_key,
+    }
+    for key in ['k_tracking', 'k_final', 'k_control']:
+        ext_ctx[key] = _composed_ctx[key]
+    return _composed_cost_base(z_flat, ext_ctx)
+
+
 # Default: use the original jnp.where version
 mpc_cost_fn = mpc_cost_fn_where
 
@@ -556,9 +649,14 @@ def run_hybrid_mpc(cost_mode='where'):
                'smooth'   → nested saturate with smooth step (no jnp.where)
                'constran' → Constraintdealer.Constran.build() — declarative,
                              modular objective + constraints, auto δ assignment
+               'composed' → dynamic k objective + build() constraints —
+                             zero manual weights, semantic roles only
     """
     # Select cost function
-    if cost_mode == 'constran':
+    if cost_mode == 'composed':
+        cost_fn = mpc_cost_fn_composed
+        mode_label = 'COMPOSED (dynamic k + semantic roles)'
+    elif cost_mode == 'constran':
         cost_fn = mpc_cost_fn_constran
         mode_label = 'CONSTRAN (declarative, build() from Constraintdealer)'
     elif cost_mode == 'smooth':
@@ -638,6 +736,21 @@ def run_hybrid_mpc(cost_mode='where'):
         bi = [int(jnp.argmax(final_pi[0])), int(jnp.argmax(final_pi[1]))]
         tx = np.array(final_mu[0, bi[0], :H])
         ty = np.array(final_mu[1, bi[1], :H])
+
+        # Dynamic k update: recalibrate from elite for next step
+        if cost_mode == 'composed':
+            best_z = jnp.concatenate([final_mu[0, bi[0], :H],
+                                       final_mu[1, bi[1], :H]])
+            _composed_ctx['init_state'] = state  # current vehicle state
+            _composed_ctx.update(
+                update_k_from_elite(dict(_composed_ctx),
+                    [(_tracking_calib, 0.0, 'tracking'),
+                     (_final_calib,    0.0, 'final'),
+                     (_control_calib,  0.0, 'control')],
+                    best_z,
+                    multiplier=3.0, min_knee=0.1,
+                    verbose=(step < 5 or step % 20 == 0)))
+
         u_exec = (jnp.array([0.0, 0.0]) if np.any(~np.isfinite(tx)) or np.any(~np.isfinite(ty))
                   else u_max * jnp.tanh(jnp.array([tx[0], ty[0]])))
         ctrl_hist.append(np.array(u_exec))
@@ -794,9 +907,10 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Hybrid MPC simulation")
     parser.add_argument('--mode', default='where',
-                       choices=['where', 'smooth', 'constran'],
-                       help="Cost function: 'where' (jnp.where branching), "
-                            "'smooth' (nested σ, no branching), "
-                            "'constran' (Constraintdealer.Constran.build())")
+                       choices=['where', 'smooth', 'constran', 'composed'],
+                       help="Cost function: 'where' (jnp.where), "
+                            "'smooth' (nested σ), "
+                            "'constran' (Constran.build()), "
+                            "'composed' (dynamic k + semantic roles)")
     args = parser.parse_args()
     run_hybrid_mpc(cost_mode=args.mode)

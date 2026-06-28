@@ -512,14 +512,20 @@ def compose_objective_adaptive(
 #
 #   The cost function is compiled ONCE.  k tracks the improving population.
 
-def _compose_dynamic_kernel(parsed):
-    """Build a kernel that reads k from ctx instead of closure."""
+def _compose_dynamic_kernel(parsed, raw_output=False):
+    """Build a kernel that reads k from ctx instead of closure.
+
+    If raw_output=True, returns sum of σ_k(T(term_i)) without outer compression.
+    Use this when passing to build() as objective_fn (build handles compression).
+    """
     def _kernel(x, ctx):
         total = 0.0
         for i, (term_fn, _, name) in enumerate(parsed):
             raw = term_fn(x, ctx)
-            k = ctx[f'k_{name}']
+            k = ctx.get(f'k_{name}', 1.0)
             total = total + sigma_k(log_transform(raw), k=k)
+        if raw_output:
+            return total  # let build() handle compression
         k_out = ctx.get('k_outer', 1.0)
         return sigma_k(total, k=k_out)
     return _kernel
@@ -528,6 +534,7 @@ def _compose_dynamic_kernel(parsed):
 def compose_objective_dynamic(
     terms,
     *,
+    raw_output: bool = False,
     jit_result: bool = True,
 ) -> Callable[[jnp.ndarray, Any], jnp.ndarray]:
     """Compose sub-objectives with k read from ctx (no recompilation).
@@ -585,7 +592,7 @@ def compose_objective_dynamic(
         name = t[2] if len(t) > 2 else f"term_{i}"
         parsed.append((fn, 0.0, name))  # k placeholder — real k from ctx
 
-    kernel = _compose_dynamic_kernel(parsed)
+    kernel = _compose_dynamic_kernel(parsed, raw_output=raw_output)
     if jit_result:
         return jax.jit(kernel)
     return kernel

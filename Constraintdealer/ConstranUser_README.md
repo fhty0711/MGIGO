@@ -1,6 +1,6 @@
 # Constran 用户手册
 
-**Constran** 是约束转化引擎——你写精确罚函数，它自动组装成求解器能用的代价函数。
+**Constran** 是约束转化引擎——你写精确罚函数 `max(0, g(x))`，它自动组装成求解器能用的代价函数。
 
 ---
 
@@ -8,11 +8,11 @@
 
 1. [三步上手](#1-三步上手)
 2. [四种约束类型](#2-四种约束类型)
-3. [三种模式：Hard / Tunable / Soft](#3-三种模式)
+3. [两种模式 + Tunable 连续谱](#3-两种模式--tunable-连续谱)
 4. [Tunable 参数怎么选](#4-tunable-参数怎么选)
-5. [语义速查表](#5-语义速查表)
-6. [MPC 用法](#6-mpc-用法)
-7. [多智能体用法](#7-多智能体用法)
+5. [变换表与预设](#5-变换表与预设)
+6. [语义速查表](#6-语义速查表)
+7. [MPC 用法](#7-mpc-用法)
 8. [常见问题](#8-常见问题)
 
 ---
@@ -22,28 +22,27 @@
 ```python
 from Constraintdealer.Constran import *
 
-# ① 写目标函数
+# ① 写目标函数和约束 (精确罚函数形式: max(0, g(x)))
 def my_obj(x, ctx):
     return jnp.sum((x[:2] - ctx['target'])**2) + 0.1 * jnp.sum(x[2:]**2)
 
+def obstacle_violation(x, ctx):
+    penetration = safe_dist - compute_min_dist(x, ctx)
+    return jnp.sum(jnp.where(penetration > 0, penetration, 0.0))
+
 # ② 声明约束
 constraints = [
-    Deterministic(lambda x, ctx: x[0] + x[1] + 4,    # g(x) ≤ 0
-                  mode='hard', priority=1, delta=1.5),
-    Deterministic(lambda x, ctx: x[1] - x[0],
-                  mode='soft', priority=2),
+    Deterministic(obstacle_violation, mode='hard', priority=1),
+    Deterministic(lambda x, ctx: jnp.sum(x[2:]**2) - efficiency_limit,
+                  mode='tunable', priority=2, tune_preset='standard'),
 ]
 
 # ③ 构建 → 给求解器
 cost_fn = build(my_obj, constraints)
-
-# 求解器直接使用
-result = mmog_igo_optimizer_mpc(
-    ..., fitness_fn_total=cost_fn, context=ctx
-)
+result = mmog_igo_optimizer_mpc(..., fitness_fn_total=cost_fn, context=ctx)
 ```
 
-**你只需要写 `g(x) ≤ 0` 形式的约束函数。** 正值 = 违反，负值/零 = 满足。Constran 自动做对数变换、饱和嵌套、优先级组装。
+**你只需要写 `max(0, g(x))` 形式的约束函数。** 正值 = 违反，零 = 满足。Constran 自动做 T_alpha 变换、σ 嵌套、优先级组装。
 
 ---
 
@@ -51,243 +50,185 @@ result = mmog_igo_optimizer_mpc(
 
 | 类型 | 你写 | Constran 自动计算 g_raw |
 |------|------|----------------------|
-| `Deterministic` | `g(x)` | `g(x)` 直接 |
-| `Chance` | `g(x, ξ)` + 噪声分布 | `Q_{1-α}(g(x,ξ))` MC 分位数 |
-| `Robust` | `g(x, ξ)` + 不确定性集 Ξ | `max_{ξ∈Ξ} g(x,ξ)` lax.scan |
-| `DRO` | `g(x, ξ)` + 模糊集 {P_k} | `max_{P_k} Q_{1-α}^{P_k}(g)` |
-
-### 2.1 Deterministic — 确定性约束
+| `Deterministic` | `max(0, g(x))` | 直接 |
+| `Chance` | `g(x, ξ)` + 噪声分布 | $Q_{1-\alpha}(g(x,\xi))$ MC 分位数 |
+| `Robust` | `g(x, ξ)` + 不确定性集 Ξ | $\max_{\xi\in\Xi} g(x,\xi)$ lax.scan |
+| `DRO` | `g(x, ξ)` + 模糊集 $\{P_k\}$ | $\max_{P_k} Q_{1-\alpha}^{P_k}(g)$ |
 
 ```python
-# g(x) ≤ 0，不涉及噪声
-Deterministic(lambda x, ctx: x[0]**2 + x[1]**2 - 25,   # 在圆内
+# Deterministic
+Deterministic(lambda x, ctx: jnp.maximum(0.0, x[0]**2 + x[1]**2 - 25),
               mode='hard', priority=1)
 
-# 双边 band 约束: c_lo ≤ h(x) ≤ c_hi
-# → 写成: max(c_lo - h(x), h(x) - c_hi) ≤ 0
-Deterministic(lambda x, ctx: jnp.maximum(
-                 0.3 - abs(x[0] - x[1] - 2),           # |x1-x2-2| ≥ 0.3
-                 abs(x[0] - x[1] - 2) - 0.3),
-              mode='hard', priority=1)
-```
+# Chance: P(g(x,ξ) ≤ 0) ≥ 1-α
+Chance(lambda x, xi, ctx: jnp.linalg.norm(x[:2] + xi) - 3.0,
+       noise_fn=lambda key, shape: jax.random.normal(key, shape) * 0.2,
+       alpha=0.1, n_samples=100,
+       mode='tunable', priority=2, tune_preset='firm')
 
-### 2.2 Chance — 概率约束
+# Robust: ∀ξ∈Ξ
+Robust(lambda x, xi, ctx: (x[0] + xi)**2 + x[1]**2 - 10,
+       uncertainty_set=jnp.concatenate([
+           jnp.linspace(-3.0, -2.0, 20), jnp.linspace(1.0, 2.0, 20)]),
+       mode='hard', priority=1)
 
-```python
-# P(g(x,ξ) ≤ 0) ≥ 1-α，ξ 的分布已知
-Chance(
-    lambda x, xi, ctx: jnp.linalg.norm(x[:2] + xi) - 3.0,  # g(x,ξ)
-    noise_fn=lambda key, shape: jax.random.normal(key, shape) * 0.2,
-    alpha=0.1,        # 90% 概率满足
-    n_samples=100,    # MC 样本数
-    mode='hard', priority=1,
-)
-```
-
-**选 n_samples：** `n_samples ≥ 10/α`。α=0.1 时 ≥ 100，α=0.01 时 ≥ 1000。
-
-### 2.3 Robust — 鲁棒约束
-
-```python
-# g(x,ξ) ≤ 0 对所有 ξ∈Ξ 成立
-xi_grid = jnp.concatenate([
-    jnp.linspace(-3.0, -2.0, 20),    # 非凸集 [-3,-2] ∪ [1,2]
-    jnp.linspace( 1.0,  2.0, 20),
-])
-
-Robust(
-    lambda x, xi, ctx: (x[0] + xi)**2 + x[1]**2 - 10.0,
-    uncertainty_set=xi_grid,
-    n_grid=40,
-    mode='hard', priority=1,
-)
-```
-
-**支持非凸、不连通的不确定性集**——传统 LMI 方法做不到。
-
-### 2.4 DRO — 分布鲁棒约束
-
-```python
-# inf_{P∈𝒫} P(g≤0) ≥ 1-α，分布本身不确定
-DRO(
-    lambda x, xi, ctx: g(x, xi),
-    ambiguity_set=[
-        lambda key, shape: jax.random.normal(key, shape) * 0.1,       # P1
-        lambda key, shape: jax.random.normal(key, shape) * 0.3,       # P2 (更宽的噪声)
-        lambda key, shape: jax.random.uniform(key, shape, -0.5, 0.5), # P3 (均匀噪声)
-    ],
-    alpha=0.1,
-    mode='hard', priority=1,
-)
+# DRO
+DRO(lambda x, xi, ctx: g(x, xi),
+    ambiguity_set=[noise_fn_1, noise_fn_2, noise_fn_3],
+    alpha=0.1, mode='hard', priority=1)
 ```
 
 ---
 
-## 3. 三种模式
+## 3. 两种模式 + Tunable 连续谱
 
-| 模式 | 机制 | 一句话 | 何时用 |
-|------|------|--------|--------|
-| **Hard** | `jnp.where(g>0, T(g)+δ, inner)` | "任何违反都不可接受" | 安全、法规、物理极限 |
-| **Tunable** | `δ·σ(β·T(g)) + inner` | "违反越差代价越大，但有上限" | 大部分场景（默认首选） |
-| **Soft** | `T(g) + inner` | "违反越差代价越大，无上限" | 偏好、最简场景 |
+没有 `jnp.where`。所有约束都是加性的。只有两种模式：
 
-### 关键区别
-
-```
-g = 0.001 (微小违反)  →  Hard: 代价≥0.832  |  Tunable β=5: 几乎满罚  |  Soft: 几乎无感
-g = 100   (严重违反)  →  Hard: 代价≈0.987  |  Tunable β=1: 封顶≈0.82  |  Soft: 代价≈0.99
+```python
+# Tunable: δ·σ(β·T(g)) + inner  — β 控制软硬
+# Soft:    T(g) + inner           — 最简, 无参数
 ```
 
-**Hard 的 $g=0.001$ 和 $g=100$ 都 > 所有内层。Tunable 的 $g>10$ 几乎封顶。Soft 永不封顶。**
+| mode | β | 行为 | 何时用 |
+|------|---|------|--------|
+| `'soft'` | — | T(g) 直接加，无参数 | 最简场景 |
+| `'tunable'` + `tune_preset='mild'` | 0.1 | 极软，大违反才触发 | 舒适/效率偏好 |
+| `'tunable'` + `tune_preset='standard'` | 0.3 | 标准软 | 默认软约束 |
+| `'tunable'` + `tune_preset='firm'` | 0.5 | 适中 | 重要偏好 |
+| `'tunable'` + `tune_preset='strong'` | 1.0 | 较硬 | 较强约束 |
+| `'tunable'` + `tune_preset='nearhard'` | 1.0 | 硬，δ 更大 | 近似硬 |
+| `'hard'` (自动→ tunable β=1) | 1.0 | **硬约束** | 安全、物理极限 |
 
-### 模式选择速查
+**`mode='hard'` 自动映射为 `tunable + β=1.0`。** 旧代码无需改动。
 
-| 想表达的语义 | 用 |
-|-------------|-----|
-| "绝对不能碰" | Hard |
-| "碰了很严重，但 10m 和 100m 一样糟" | Tunable β=1~5 |
-| "碰得越深越糟，永不封顶" | Soft |
-| "小擦边无所谓，别大撞就行" | Tunable β=5~50 |
-| "多点擦边比单点深撞差" | Tunable(β=1)→Σ→σ (见 §5) |
-| "单点深撞比多点擦边差" | Tunable(β=5)→Σ→σ 或加 1.5 floor |
+### 关键区别（g≥0 精确罚函数）
+
+```
+g=0.001 (微小违反):  β=0.1 → 几乎无感    β=1(hard) → 立刻感知
+g=100   (严重违反):  β=0.1 → 温和惩罚    β=1(hard) → 强惩罚
+```
+
+`β=1` 在 $g \to 0^+$ 处提供了层级分离，同时保留违反区区分度。$β>1$ 会导致 σ 饱和、丢失信息。
 
 ---
 
 ## 4. Tunable 参数怎么选
 
-```
-贡献 = δ · σ(β · T(g))
-         ↑       ↑
-      最大幅度  过渡锐度
-```
+### δ_soft — "最多扣几分"
 
-### β — "多快触发"
+内层内容经 σ 后输出约 $[0, 0.7]$。以此为参考：
 
-**公式：** `β ≈ 0.58 / log(1 + g_accept)`
+| δ_soft | 效果 |
+|--------|------|
+| 0.3~0.5 | 轻偏好，用于硬约束（甜点） |
+| 1.0~1.5 | 与目标同级竞争 |
+| 2.0~3.0 | 强偏好，通常压倒目标 |
 
-其中 `g_accept` = 你认为"可以容忍"的最大违反量。
+### β — "多快触发"（仅自定义时需设）
+
+通常直接用 `tune_preset` 就够了。手动设 β 的场景：
 
 | 可接受违反 | β | 效果 |
 |-----------|-----|------|
-| ~10 | 0.2 | 非常软，大违反才感到 |
-| ~1 | 0.8 | 标准过渡 |
-| ~0.1 | 6 | 小违反即触发 |
-| ~0.01 | 60 | 很锐 |
-| ~0.001 | 500+ | 几乎即触即满 |
+| ~10 | 0.1 | 非常软 |
+| ~1 | 0.5 | 标准过渡 |
+| ~0.1 | 1.0 | 较锐（硬约束甜点） |
+| ~0.01 | 5.0+ | 很锐 |
 
-### δ — "最多扣几分"
-
-内层内容经 σ 后输出约 [0, 0.7]。以此为参考：
-
-| δ | 效果 |
-|---|------|
-| 0.1~0.5 | 轻偏好，几乎不改变排名 |
-| 1.0~2.0 | 与目标同级竞争 |
-| 3.0~5.0 | 强偏好，通常压倒目标 |
-
-### 四档套餐
+### 套餐速查
 
 ```python
 # 轻微偏好
-Chance(..., mode='tunable', priority=3, delta_soft=0.3, beta=0.2)
+Deterministic(viol, mode='tunable', priority=3, tune_preset='mild')
 
 # 标准软约束
-Chance(..., mode='tunable', priority=2, delta_soft=1.0, beta=1.0)
+Deterministic(viol, mode='tunable', priority=2, tune_preset='standard')
 
-# 较强偏好
-Chance(..., mode='tunable', priority=2, delta_soft=2.0, beta=5.0)
+# 重要但可调
+Deterministic(viol, mode='tunable', priority=2, tune_preset='firm')
 
-# 近似硬约束（光滑版）
-Chance(..., mode='tunable', priority=1, delta_soft=3.0, beta=50)
+# 近似硬
+Deterministic(viol, mode='tunable', priority=1, tune_preset='nearhard')
+
+# 硬约束 (最简写法)
+Deterministic(viol, mode='hard', priority=1)
 ```
 
 ---
 
-## 5. 语义速查表
+## 5. 变换表与预设
 
-### 违反定义
+T_alpha 把原始 $g$ 映射到 $[0, 12]$ 范围。每层可选择变换风格：
 
-| 语义 | 写法 |
-|------|------|
-| 违反量与穿透深度正比 | `pen_i`（有符号，直接用） |
-| 满足就够了，不需要"更满足" | `max(0, pen_i)` |
-| 每个违反点有最低代价 | `1.5 + pen_i`（带 floor） |
-
-### 聚合方式
-
-| 语义 | 聚合 | 含义 |
-|------|------|------|
-| 总违反量重要 | `Σ` | 全程擦边 > 单点碰撞 |
-| 只看最坏一步 | `max` | 不允许任何一步出格 |
-| 违反步数重要，深度不重要 | `count` | 广度 > 深度 |
-| 允许 5% 步违规 | `Q₉₅` | 鲁棒性 |
-
-### 先 T 再 Sum（每点独立压缩再聚合）
-
-当前 Constran 对 `g_fn` 返回的标量做 T —— 即**先 sum 再 T**。
-如果想**先 T 再 sum**（每采样点独立压缩再累加），直接在 `g_fn` 里做：
-
-```python
-def g_fn(x, ctx):
-    pens = compute_penetrations(x)          # (200,) 向量
-    return jnp.sum(log_transform(pens))     # 先 T 再 sum
-    # Constran 会再 T 一次 → "双重 T"
+```
+transform='standard'  — 默认, 地板 T(0⁺)=0.7
+transform='sharp'     — 地板 T(0⁺)=1.0, 小违反立刻重罚
+transform='tight'     — 地板 T(0⁺)=0.3, 近 log 但无盲区
+transform='wide'      — 地板 T(0⁺)=0.3, 宽线性区
+transform='log'       — 原版 log_transform, 无地板
 ```
 
-**双重 T 无害：**
+目标函数也有自己的变换：
+```python
+cost_fn = build(my_obj, constraints, obj_transform='standard')  # 默认
+cost_fn = build(my_obj, constraints, obj_transform='flat')      # 更平, 适合超大范围
+cost_fn = build(my_obj, constraints, obj_transform='log')       # 原版
+```
 
-- **小值线性区**：T(x)≈x。T(T(x)) ≈ T(x)，和单层没区别。
-- **大值额外压缩**：T(10)≈2.40，200×2.40=480，T(480)≈6.18。对比单层 T(2000)≈7.60 —— 压得更狠但排序不变。Tunable 最后还有 σ 封顶，多压一点无所谓。
-- **单调性完好**：T 是严格单调的，双重 T 仍然是严格单调的。
+**约束层 σ 默认 $k=0.2$**（拐点在 $g \approx 150$），12 个数量级全可区分。目标层 $k_{\text{inner}}=0.1$。
 
-本质：T 的线性区（小值）和 σ 的封顶（大值）让双重 T 不会引入问题。
-不需要改 Constran，直接在 `g_fn` 里写就行。
+---
+
+## 6. 语义速查表
 
 ### 完整语义 → 方案映射
 
 ```
 "任何碰撞都不行"
-  → Deterministic(pen>0), mode='hard'
+  → Deterministic(viol, mode='hard', priority=1, transform='sharp')
 
-"碰撞越深越差，没有上限"
-  → 聚合 Σ, mode='soft'
+"碰撞越深越差，但 10m 和 100m 差不多"
+  → Deterministic(viol, mode='tunable', priority=1, tune_preset='firm')
 
-"碰撞越深越差，但 10m 和 100m 一样糟"
-  → 聚合 Σ, mode='tunable', β=1
+"小擦边无所谓，别大撞就行"
+  → Deterministic(viol, mode='tunable', priority=2, tune_preset='standard')
 
-"宁可单点深撞，也别全程擦边"
-  → 每步 Tunable(β=1) → Σ → σ（大穿透被压扁）
+"只是偏好，好跟踪可补偿偶尔擦边"
+  → Deterministic(viol, mode='soft', priority=3)
 
-"小擦边随便，别大穿透就行"
-  → 每步 Tunable(β=5) → Σ → σ（放大单点大穿透）
+"安全就是安全，微小违反也要感知"
+  → Deterministic(viol, mode='hard', priority=1, transform='sharp')
 
-"只是偏好，好跟踪可补偿小擦边"
-  → mode='soft' 或 mode='tunable' with δ=1, β=1
-    放在 Hard 层里面，不加 jnp.where
-
-"安全就是安全，不需要奖励远离"
-  → max(0, pen_i), 或 penalize_only_soft=True
-
-"每步独立评估，不能有任何一步有大违反"
-  → 聚合 max (不是 Σ), mode='tunable', β=5
+"越远离约束越好（奖励深度满足）"
+  → 使用带符号的 g(x) 而非 max(0,g), mode='soft'
 ```
+
+### 先 T 再 Sum（每点独立压缩再聚合）
+
+当前 Constran 对 g_fn 返回的标量做 T——即**先 sum 再 T**。
+如果想**先 T 再 sum**，直接在 g_fn 里做：
+
+```python
+def g_fn(x, ctx):
+    pens = compute_penetrations(x)          # (200,) 向量
+    return jnp.sum(log_transform(pens))     # 先 T 再 sum
+    # Constran 会再 T 一次 → "双重 T", 无害
+```
+
+双重 T 不破坏单调性。详见 [ConstraintsTransformation_README.md](ConstraintsTransformation_README.md)。
 
 ---
 
-## 6. MPC 用法
+## 7. MPC 用法
 
-### 关键原则：build 一次，ctx 传动态信息
+### 关键：build 一次，ctx 传动态信息
 
 ```python
 # ✓ 正确
-cost_fn = build(my_obj, constraints)    # ← 只在循环外调一次
+cost_fn = build(my_obj, constraints)    # ← 只调一次
 
 for step in range(T_mpc):
-    ctx = {
-        'target': targets[step],        # 动态目标
-        'obs_pos': obs_positions[step], # 动态障碍物
-        'current_state': state,         # 当前状态
-    }
+    ctx = {'target': targets[step], 'obs_pos': obs[step], ...}
     result = solver(..., fitness_fn_total=cost_fn, context=ctx)
 
 # ✗ 错误 — 每次都 rebuild → 每次都 JIT 重编译
@@ -296,113 +237,40 @@ for step in range(T_mpc):
     result = solver(...)
 ```
 
-### 完整 MPC 示例
+### 多智能体
 
 ```python
-from Constraintdealer.Constran import *
-
-# 轨迹上每个点的碰撞约束
-def obstacle_violation(z_flat, ctx):
-    trajectory = rollout(z_flat, ctx['current_state'])
-    penetration = safe_dist - compute_min_dists(trajectory, ctx['obs_pos'])
-    return jnp.sum(jnp.where(penetration > 0, penetration, 0.0))
-
-# 目标：跟踪 + 控制代价
-def tracking_objective(z_flat, ctx):
-    trajectory = rollout(z_flat, ctx['current_state'])
-    return (jnp.sum(jnp.linalg.norm(trajectory - ctx['target'], axis=1)) * 2.0
-            + jnp.linalg.norm(trajectory[-1] - ctx['target']) * 15.0
-            + ...)  # 控制代价
-
-# 两层嵌套
-cost_fn = build(
-    tracking_objective,
-    [
-        Deterministic(obstacle_violation,
-                      mode='tunable', priority=1,
-                      delta_soft=2.0, beta=1.0),
-    ],
-    k_inner=0.1,
-)
-
-# MPC 循环
-cost_fn_jit = jax.jit(cost_fn)
-for step in range(T_mpc):
-    ctx = {'target': targets[step], 'obs_pos': obs[step],
-           'current_state': state}
-    mu, L, pi, v = mmog_igo_optimizer_mpc(
-        key, T=200, dt=0.1, M=30, K=5, B=80, B0=40,
-        dims=[H*2], T_0=50,
-        fitness_fn_total=cost_fn_jit,
-        initial_mu_k=mu, initial_L_inv_k=L, initial_v_k=v,
-        context=ctx,
-    )
-```
-
-### 如果求解器自己 JIT 了循环
-
-MPCsolverM22 内部用 `lax.scan` 已经 JIT 了整个优化循环。此时 `build()` 返回的函数会被内联，外层 JIT 是冗余的。可以关掉：
-
-```python
-cost_fn = build(my_obj, constraints, jit_cost=False)
-```
-
----
-
-## 7. 多智能体用法
-
-```python
-from Constraintdealer.Constran import build_multi_agent
-
 agent_fns = build_multi_agent({
-    0: (  # Agent 0: 追踪目标，有避障约束
-        lambda x, ctx: jnp.sum((x[:2] - ctx['t0'])**2),
-        [Deterministic(lambda x, ctx: x[0] - 1.0, mode='hard', priority=1)]
-    ),
-    1: (  # Agent 1: 追踪目标，无约束
-        lambda x, ctx: jnp.sum((x[2:] - ctx['t1'])**2),
-        []
-    ),
+    0: (obj_agent0, [Deterministic(viol0, mode='hard', priority=1)]),
+    1: (obj_agent1, []),
 })
-
-# 每个 agent 的 cost_fn 签名: (agent_idx, joint_x, ctx) -> scalar
-result = mmog_igo_rne_blocks_solver(
-    ..., fitness_fn_j=agent_fns[0], ...
-)
+result = mmog_igo_rne_blocks_solver(..., fitness_fn_j=agent_fns[0], ...)
 ```
 
 ---
 
 ## 8. 常见问题
 
-### Q: Hard / Tunable / Soft 怎么选？
+### Q: mode='hard' 和 mode='tunable' + tune_preset='nearhard' 有什么区别？
 
-默认 Tunable 起手，调 β 和 δ。需要绝对优先级 → Hard。最简单场景 → Soft。
+`mode='hard'` 自动设 β=1.0, δ=0.5。`nearhard` 设 β=1.0, δ=2.0。前者 δ 更小，违反区动态范围更大。
 
-### Q: δ 不设会怎样？
+### Q: δ 设多大合适？
 
-`autodelta()` 自动赋值：最外层 Hard → 1.5，内层 Hard → 3.0。Tunable 默认 δ_soft=2.0, β=5.0。
+硬约束（β=1）：δ=0.3~0.5。软约束：δ=1.0~1.5。Tunable：用 `tune_preset` 自动选。
 
-### Q: 约束满足时会奖励吗？
+### Q: 违反区会太"平坦"吗？
 
-默认**会**——`T(g)<0` 降低代价。这是设计意图：深度在可行域内部的解排名更高。如果不需要，设 `penalize_only_soft=True`。
+用 $k=0.2$ 的约束层 σ，$g$ 从 $10^{-6}$ 到 $10^6$ 的 12 个数量级全可区分。只有 $g > 10^6$ 才开始饱和——这是物理极限。
+
+### Q: 支持多少层约束？
+
+任意 $M$。按 priority 排序后逐层嵌套。20 层测试通过。
 
 ### Q: 会被"深度满足"扰乱吗？
 
-实际工程中不会——大多数约束有物理下界（`max(0, pen)` 或 `|h(x)|` 天然 ≥ 0）。如果约束可以无限负（罕见），用 Tunable 封顶。
-
-### Q: 多点擦边 vs 单点深撞怎么控制？
-
-三个旋钮：① floor（如 1.5+pen）② 聚合方式（Σ vs max）③ 模式参数（β, δ）。见 §5 速查表。
-
-### Q: 能不能和原来的 exact penalty 混用？
-
-可以。`build()` 返回的就是 `(x, ctx) -> scalar`，和其他 cost function 签名一致。可以在外层再加自己的处理。
+精确罚函数 $g \ge 0$ 天然不存在深度满足——满足时 $g=0$，$\mathcal{T}(0)=0$，贡献为零。
 
 ### Q: 约束函数里能做复杂计算吗？
 
-可以。`g_fn` 可以是任意 JAX 计算——rollout 轨迹、查表、神经网络推理。只要返回标量。
-
-### Q: random.PRNGKey(0) 固定种子对吗？
-
-Chance/DRO 约束用固定种子 `PRNGKey(0)`，保证同一次 `build()` 内 cost function 是确定的（否则 JAX 会重编译）。如需随机性，在 `ctx` 中传入 key 并在 `g_fn` 内显式使用。
+可以。`g_fn` 可以是任意 JAX 计算——rollout 轨迹、MC 采样、查表。只要返回标量。
