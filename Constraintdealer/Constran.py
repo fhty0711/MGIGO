@@ -35,25 +35,31 @@ import warnings
 # Interpolation is log10-linear between knots.
 
 # 约束预设
-TRANSFORM_TIGHT = (
-    np.array([1e-8, 1e-6, 1e-4, 1e-2, 1e-1, 1e0, 1e2, 1e4, 1e6]),
-    np.array([0.3,  0.5,  0.7,  0.9,  1.2,  2.0,  4.0,  8.0,  12.0]),
-)  # 地板低(0.3), 过渡缓 — 类似原始 log, 但最小违反也能感知
+# === 工程标定的三档变换表 ===
+# Soft:  g < 0.01 可容忍 → T ≈ 0.02~0.15,  之后渐升
+# Tunable: g < 0.01 明显感知 → T ≈ 0.2~0.65
+# Hard:    g → 0⁺ 立刻惩罚 → 地板 0.6+
 
-TRANSFORM_STANDARD = (
-    np.array([1e-6, 1e-4, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e4, 1e6]),
-    np.array([0.7,  0.8,  0.9,  1.0,  1.5,  2.5,  4.0,  7.0,  10.0]),
-)  # 默认 — 地板 0.7, 标准过渡
+TRANSFORM_SOFT = (
+    np.array([1e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 0.5, 1, 10, 100, 1e4, 1e6]),
+    np.array([0.02, 0.05, 0.1,  0.15, 0.25, 0.4,  0.7, 1.2, 2.5, 4.5,  8.0, 12.0]),
+)  # 地板 0.02, g=0.01→T=0.15(轻触), g=0.1→T=0.4(感知)
 
-TRANSFORM_SHARP = (
-    np.array([1e-6, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e2, 1e4, 1e6]),
-    np.array([1.0,  1.2,  1.5,  2.0,  2.5,  3.5,  6.0,  9.0,  12.0]),
-)  # 地板高(1.0), 急升 — 小违反立即重罚, 接近硬
+TRANSFORM_TUNABLE = (
+    np.array([1e-6, 1e-4, 1e-3, 1e-2, 0.1, 0.5, 1, 10, 100, 1e4, 1e6]),
+    np.array([0.2,  0.35, 0.5,  0.65, 0.9, 1.3, 1.8, 3.0, 5.5,  9.0, 13.0]),
+)  # 地板 0.2, g=0.01→T=0.65(明显), g=1e-4→T=0.35(可感)
 
-TRANSFORM_WIDE = (
-    np.array([1e-2, 1e-1, 1e0, 1e1, 1e2, 1e4, 1e6]),
-    np.array([0.3,  0.5,  1.0,  2.0,  4.0,  8.0,  12.0]),
-)  # 地板很低(0.3), 宽线性区 — 适合软约束/偏好
+TRANSFORM_HARD = (
+    np.array([1e-8, 1e-6, 1e-4, 1e-3, 1e-2, 0.1, 1, 10, 100, 1e4, 1e6]),
+    np.array([0.6,  0.75, 0.9,  1.1,  1.4,  1.8, 2.5, 4.0, 7.0, 10.0, 13.0]),
+)  # 地板 0.6, g=1e-6→T=0.75(立刻重罚)
+
+# 保留别名
+TRANSFORM_STANDARD = TRANSFORM_TUNABLE  # 'standard' → Tunable 标定
+TRANSFORM_SHARP = TRANSFORM_HARD        # 'sharp' → Hard 标定
+TRANSFORM_TIGHT = TRANSFORM_SOFT        # 'tight' → Soft 标定 (向后兼容)
+TRANSFORM_WIDE = TRANSFORM_SOFT         # 'wide' 也指向 Soft
 
 # 目标预设
 OBJ_TRANSFORM_STANDARD = (
@@ -68,11 +74,21 @@ OBJ_TRANSFORM_FLAT = (
 
 # 预设字典
 TRANSFORM_PRESETS = {
-    'tight':    TRANSFORM_TIGHT,
-    'standard': TRANSFORM_STANDARD,
-    'sharp':    TRANSFORM_SHARP,
-    'wide':     TRANSFORM_WIDE,
-    'log':      None,  # sentinel: use plain log_transform
+    'soft':     TRANSFORM_SOFT,
+    'tunable':  TRANSFORM_TUNABLE,
+    'hard':     TRANSFORM_HARD,
+    'tight':    TRANSFORM_SOFT,     # alias
+    'standard': TRANSFORM_TUNABLE,  # alias
+    'sharp':    TRANSFORM_HARD,     # alias
+    'wide':     TRANSFORM_SOFT,     # alias
+    'log':      None,
+}
+
+# Per-mode default (auto-detected when transform='')
+DEFAULT_TRANSFORM = {
+    'soft':    'soft',
+    'tunable': 'tunable',
+    'hard':    'hard',
 }
 OBJ_PRESETS = {
     'standard': OBJ_TRANSFORM_STANDARD,
@@ -178,7 +194,8 @@ TUNE_PRESETS = {
     'firm':     (0.5, 1.5),
     'strong':   (1.0, 1.5),
     'nearhard': (1.0, 2.0),
-    '__hard__': (NEAR_HARD_BETA, 0.5),  # internal: mapped from mode='hard', δ=0.5
+    '__hard__': (2.0, 1.5),                 # β=2,δ=1.5 — guaranteed any-viol>any-ok
+    '__tunable_default__': (0.3, 1.0),  # auto for mode='tunable' without tune_preset
 }
 
 
@@ -203,7 +220,7 @@ class ConstraintSpec:
     delta_soft: Optional[float] = None
     beta: Optional[float] = None
     tune_preset: str = 'none'               # preset for (β, δ_soft), or 'none'
-    transform: str = 'standard'
+    transform: str = ''  # '' = auto-detect from mode
     _transform_table: Optional[Tuple] = None
 
     def __post_init__(self):
@@ -213,11 +230,17 @@ class ConstraintSpec:
             if self.delta is not None and self.delta_soft is None:
                 self.delta_soft = self.delta
             if self.beta is None:
-                self.beta = NEAR_HARD_BETA  # 1e7
+                self.beta = NEAR_HARD_BETA
             if self.tune_preset == 'none':
-                self.tune_preset = '__hard__'  # internal marker
+                self.tune_preset = '__hard__'
         if self.mode not in ('soft', 'tunable'):
             raise ValueError(f"mode must be 'soft' or 'tunable', got {self.mode!r}")
+        # Auto-detect transform from mode if not explicitly set
+        if not self.transform:
+            self.transform = DEFAULT_TRANSFORM.get(self.mode, 'standard')
+        # Auto-detect tune_preset for tunable mode if not explicitly set
+        if self.mode == 'tunable' and self.tune_preset == 'none' and self.beta is None:
+            self.tune_preset = '__tunable_default__'
         if self.transform not in TRANSFORM_PRESETS and self._transform_table is None:
             raise ValueError(
                 f"Unknown transform preset: {self.transform!r}. "
@@ -238,13 +261,16 @@ class ConstraintSpec:
         return DELTA_PRESETS[self.delta_table]
 
     def get_tune_params(self):
-        if self.tune_preset not in ('none', '__hard__'):
+        if self.tune_preset not in ('none', '__hard__', '__tunable_default__'):
             return TUNE_PRESETS[self.tune_preset]
         if self.tune_preset == '__hard__':
-            return (NEAR_HARD_BETA,
+            return (2.0,
                     self.delta_soft if self.delta_soft is not None else 1.5)
-        return (self.beta if self.beta is not None else 5.0,
-                self.delta_soft if self.delta_soft is not None else 2.0)
+        if self.tune_preset == '__tunable_default__':
+            return TUNE_PRESETS['__tunable_default__']
+        # 'none': user explicitly set beta/delta_soft
+        return (self.beta if self.beta is not None else 0.3,
+                self.delta_soft if self.delta_soft is not None else 1.0)
 
 
 @dataclass
@@ -544,13 +570,15 @@ def _validate_constraints(constraints: Sequence[ConstraintSpec]) -> None:
 
 
 def autodelta(constraints: Sequence[ConstraintSpec]) -> List[ConstraintSpec]:
-    """Auto-assign δ: outermost hard gets 0.5, inner gets 0.3 (sweet spot)."""
+    """Auto-assign δ: outermost hard gets 1.5, inner gets 0.5."""
     hard_specs = [s for s in constraints if s.mode in ('hard', 'tunable') and s.delta_soft is None]
     if hard_specs:
         min_prio = min(s.priority for s in hard_specs)
         for spec in hard_specs:
-            spec.delta_soft = 0.5 if spec.priority == min_prio else 0.3
-            spec.beta = NEAR_HARD_BETA if spec.beta is None else spec.beta
+            if spec.mode == 'tunable' and spec.tune_preset == '__hard__':
+                spec.delta_soft = 1.5 if spec.priority == min_prio else 0.5
+            elif spec.mode == 'tunable' and spec.beta is None:
+                spec.beta = 0.3  # tunable default
     return list(constraints)
 
 

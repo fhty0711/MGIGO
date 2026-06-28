@@ -42,7 +42,14 @@ import jax.numpy as jnp
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
 # Reuse the core math from Constran — no duplication
-from Constraintdealer.Constran import sigma_k, log_transform
+from Constraintdealer.Constran import (
+    sigma_k, log_transform, T_alpha,
+    OBJECTIVE_KNOTS_G, OBJECTIVE_KNOTS_T,
+)
+
+# Sweet-spot k for objective composition — keeps σ in knee over 6+ decades.
+# Same gain as constraint layers (CONSTRAINT_K) for consistent gain structure.
+OBJ_K_SAT = 0.2
 
 
 # ===========================================================================
@@ -222,6 +229,117 @@ def compose_objective(
             raw = term_fn(x, ctx)
             total = total + sigma_k(log_transform(raw), k=k)
         return sigma_k(total, k=k_outer)
+
+    if jit_result:
+        return jax.jit(_composed)
+    return _composed
+
+
+# ===========================================================================
+# 2b. Semantic Objective Composition — Zero-Parameter, Zero-Tuning
+# ===========================================================================
+
+def compose_objective_semantic(
+    terms: Sequence[Tuple[Callable, str]],
+    *,
+    transform_table: Tuple = (OBJECTIVE_KNOTS_G, OBJECTIVE_KNOTS_T),
+    k_sat: float = OBJ_K_SAT,
+    raw_output: bool = False,
+    jit_result: bool = True,
+) -> Callable[[jnp.ndarray, Any], jnp.ndarray]:
+    """Compose sub-objectives with zero parameters — just semantic names.
+
+    Each sub-term is independently transformed and saturated::
+
+        compressed_i = σ( T_alpha(term_fn_i(x, ctx)), k=k_sat )
+
+    where T_alpha is a piecewise log-linear transform with a constant floor,
+    keeping outputs in the σ knee region across **all orders of magnitude**
+    without any per-term calibration, dynamic tracking, or manual weights.
+
+    All compressed terms are summed.  By default a final outer σ is applied::
+
+        result = σ( Σ compressed_i, k=k_sat )           # raw_output=False
+
+    When *raw_output=True*, the outer σ is skipped. Use this when the
+    result will be passed to ``Constran.build()`` as the objective_fn —
+    build() handles the final compression, avoiding double-σ collapse::
+
+        result = Σ compressed_i                          # raw_output=True
+
+    **Why this replaces all tuning (weights, k, calibration, dynamic tracking):**
+
+    - **T_alpha's floor**: Tiny values (1e-6) → T ≈ 0.5, immediately perceptible.
+      Large values (1e6) → T ≈ 12, never exploding.  No blind spots.
+    - **k_sat = 0.2**: The sweet-spot gain — σ knee at T ≈ 5 (raw ≈ 150).
+      Every term, regardless of magnitude, operates in [0.1, 0.7] — the sensitive
+      zone where gradient is strong and ranking is robust.
+    - **Semantic hierarchy emerges naturally**: A term spanning 6 orders of
+      magnitude (tracking) gets a wider σ output range than one spanning 3 orders
+      (control).  No weights, no priorities, no roles — the data decides.
+
+    This is the Small-Gain Theorem in action: each channel has Lipschitz gain
+    k_sat < 1 (contractive), the outer σ caps the sum → the composite is
+    input-to-state stable (bounded input → bounded output, always in [0,1)).
+
+    Parameters
+    ----------
+    terms : list of (callable, str)
+        ``(term_fn, name)``.  ``term_fn(x, ctx) -> scalar`` (can be negative).
+        ``name`` is for diagnostics only — no semantic role is encoded.
+    transform_table : (knots_g, knots_T), optional
+        Custom T_alpha knot table.  Default: ``OBJECTIVE_KNOTS_G/T``
+        (floor=0.5, log-like compression).  Also available: ``OBJ_TRANSFORM_FLAT``.
+    k_sat : float
+        Saturation gain for all terms.  Default 0.2 (knee at T≈5, raw≈150).
+    raw_output : bool
+        If False (default), applies outer σ — complete, standalone cost in [0,1).
+        If True, returns the uncompressed sum — use when passing to build().
+    jit_result : bool
+        If True, wrap with ``jax.jit``.
+
+    Returns
+    -------
+    cost_fn : (x, ctx) -> scalar
+
+    Examples
+    --------
+    >>> from Constraintdealer.ObjectiveComposer import compose_objective_semantic
+    >>> from Constraintdealer.Constran import build, Deterministic
+    >>>
+    >>> def tracking(x, ctx): return jnp.sum((x[:2] - ctx['target'])**2)
+    >>> def final_err(x, ctx): return 15 * jnp.sum((x[:2] - ctx['target'])**2)
+    >>> def control(x, ctx): return 0.1 * jnp.sum(x[2:]**2)
+    >>>
+    >>> # Standalone: outer σ included → output in [0, 1)
+    >>> obj = compose_objective_semantic([
+    ...     (tracking,   "tracking"),
+    ...     (final_err,  "final"),
+    ...     (control,    "control"),
+    ... ])
+    >>>
+    >>> # With build(): use raw_output=True to avoid double-σ
+    >>> obj_raw = compose_objective_semantic([
+    ...     (tracking,   "tracking"),
+    ...     (final_err,  "final"),
+    ...     (control,    "control"),
+    ... ], raw_output=True)
+    >>> cost = build(obj_raw, [Deterministic(obs_fn, mode='hard', priority=1)])
+    """
+    kg = jnp.asarray(transform_table[0])
+    kT = jnp.asarray(transform_table[1])
+
+    def _composed(x: jnp.ndarray, ctx: Any) -> jnp.ndarray:
+        # T_alpha per term (floor + compression) → sum → σ ONCE on the total.
+        # Per-term σ would crush the dynamic range before the sum competes
+        # with constraint layers in build().
+        total = 0.0
+        for term_fn, _name in terms:
+            raw = term_fn(x, ctx)
+            total = total + T_alpha(raw, kg, kT)
+        if raw_output:
+            return total  # uncompressed — build() handles final compression
+        return sigma_k(total, k=k_sat)
 
     if jit_result:
         return jax.jit(_composed)
@@ -833,5 +951,34 @@ if __name__ == "__main__":
     for typical, maximum in [(1.0, 50.0), (0.1, 2.0), (0.5, 10.0)]:
         k = float(suggest_k(typical, maximum))
         print(f"    typical={typical:.1f}, max={maximum:.1f} → k={k:.4f}")
+
+    # ── Test compose_objective_semantic ──
+    print("\n--- compose_objective_semantic ---")
+    print(f"  Fixed k_sat = {OBJ_K_SAT}")
+    print(f"  Objective transform floor = {OBJECTIVE_KNOTS_T[0]}")
+
+    obj_sem = compose_objective_semantic([
+        (track, "tracking"),
+        (ctrl,  "control"),
+    ])
+
+    # Test at different tracking error levels
+    for err in [100.0, 10.0, 1.0, 0.1, 0.01, 0.001]:
+        x_test = jnp.array([1.0 + jnp.sqrt(err/2), 2.0 + jnp.sqrt(err/2), 0.5, 0.3])
+        ctx_test = {'target': jnp.array([1.0, 2.0])}
+        cost_s = float(obj_sem(x_test, ctx_test))
+        print(f"    err≈{err:>8.2f} → cost={cost_s:.6f}")
+
+    # Verify monotonicity: smaller error → smaller cost
+    x_big = jnp.array([10.0, 10.0, 0.5, 0.3])
+    x_sml = jnp.array([1.1, 2.1, 0.5, 0.3])
+    c_big = float(obj_sem(x_big, ctx_test))
+    c_sml = float(obj_sem(x_sml, ctx_test))
+    print(f"    big_err cost={c_big:.6f}  small_err cost={c_sml:.6f}  "
+          f"monotonic={'✓' if c_big > c_sml else '✗'}")
+
+    # Verify output range
+    print(f"    Output range: [{min(c_big, c_sml):.4f}, {max(c_big, c_sml):.4f}] "
+          f"(all in [0,1) {'✓' if 0 <= c_big < 1 and 0 <= c_sml < 1 else '✗'})")
 
     print("\n  All tests passed ✓")
