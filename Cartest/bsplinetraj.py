@@ -36,7 +36,10 @@ class BSplineTrajectoryGenerator:
         self.d2B  = jnp.array(data["d2B"])
         self.d3B  = jnp.array(data["d3B"])
         self.d4B  = jnp.array(data["d4B"])
-        self.greville = jnp.array(data["greville"])  # [n_ctrl]
+        self.greville = jnp.array(data["greville"])
+        self.scale_v  = jnp.array(data["scale_v"])  # [n_ctrl-1] per-dP scale
+        self.scale_a  = jnp.array(data["scale_a"])  # [n_ctrl-2] per-d²P scale
+        self.scale_j  = jnp.array(data["scale_j"])  # [n_ctrl-3] per-d³P scale
 
         self.T = int(self.B.shape[0])
         self.n_ctrl = int(self.B.shape[1])
