@@ -60,7 +60,7 @@ def run(steps=150, seed=0, plot=True):
     constraints = make_constraints(gen)
     cost_fn = build(obj_fn, constraints, k_inner=0.1, obj_transform='standard')
 
-    vehicle = FrenetVehicleModel(acc_max=ACC_MAX, dt=gen.dt)
+    vehicle = FrenetVehicleModel(mu=0.85, dt=gen.dt)
 
     key = random.PRNGKey(seed)
 
@@ -111,21 +111,35 @@ def run(steps=150, seed=0, plot=True):
         ctrl_s = mu_k[0, best, :D_max]
         ctrl_d = mu_k[1, best, :D_max]
 
+        # Evaluate plan
         s, d, s_dot, d_dot, s_ddot, d_ddot, s_dddot, d_dddot = gen.evaluate(
             ctrl_s, ctrl_d, s0, s_dot0, s_ddot0, d0, d_dot0, d_ddot0)
 
-        v = jnp.sqrt(s_dot ** 2 + d_dot ** 2)
-        jm = jnp.sqrt(s_dddot ** 2 + d_dddot ** 2)
-        am = jnp.sqrt(s_ddot ** 2 + d_ddot ** 2)
+        # Vehicle-frame states (correct kinematics with curvature coupling)
+        st = gen.to_vehicle_states(s, d, s_dot, d_dot, s_ddot, d_ddot, s_dddot, d_dddot)
+        v, a_long, a_lat, j_long, j_lat = st[:, 2], st[:, 4], st[:, 5], st[:, 6], st[:, 7]
+        jm = jnp.sqrt(j_long ** 2 + j_lat ** 2)
+        am = jnp.sqrt(a_long ** 2 + a_lat ** 2)
 
-        # Per-constraint g values (q90 for reporting)
+        # Per-constraint g values (q90 for reporting, matching constraint formulas)
         x_cart, y_cart = gen.to_cartesian(s, d)
         g_lane = float(jnp.quantile(jnp.maximum(0., jnp.abs(d) - LANE_HW), 0.9))
         g_obs  = float(jnp.quantile(jnp.maximum(0., OBS_SAFE_DIST + obs_rad[0] -
             jnp.sqrt((x_cart - obs_pos[0, 0]) ** 2 + (y_cart - obs_pos[0, 1]) ** 2)), 0.9))
-        g_jerk = float(jnp.quantile(jnp.maximum(0., jm - JERK_MAX), 0.9))
-        g_acc  = float(jnp.quantile(jnp.maximum(0., am - ACC_MAX), 0.9))
-        g_spd  = float(jnp.quantile(jnp.maximum(0., jnp.maximum(V_MIN - v, v - V_MAX)), 0.9))
+        g_jerk = float(jnp.quantile(
+            jnp.maximum(
+                jnp.maximum(0., jnp.abs(j_long) - JERK_MAX),
+                jnp.maximum(jnp.maximum(0., jnp.abs(j_lat) - JERK_MAX),
+                            jnp.maximum(0., jm            - JERK_MAX)),
+            ), 0.9))
+        g_acc  = float(jnp.quantile(
+            jnp.maximum(
+                jnp.maximum(0., jnp.abs(a_long) - ACC_MAX),
+                jnp.maximum(jnp.maximum(0., jnp.abs(a_lat) - ACC_MAX),
+                            jnp.maximum(0., am            - ACC_MAX)),
+            ), 0.9))
+        g_spd  = float(jnp.quantile(
+            jnp.maximum(jnp.maximum(0., V_MIN - v), jnp.maximum(0., v - V_MAX)), 0.9))
         total_cost = float(cost_fn(jnp.concatenate([ctrl_s, ctrl_d]), ctx))
         print(f"        cost={total_cost:.4f} g=[lane={g_lane:.2f} obs={g_obs:.2f} jerk={g_jerk:.1f} acc={g_acc:.1f} spd={g_spd:.1f}]")
 
@@ -140,14 +154,14 @@ def run(steps=150, seed=0, plot=True):
             (x_cart[:, None] - obs_pos[None, :, 0]) ** 2 +
             (y_cart[:, None] - obs_pos[None, :, 1]) ** 2
         ) - obs_rad[None, :]))
-        ma = float(jnp.max(jnp.abs(s_ddot)))
-        ml = float(jnp.max(jnp.abs(d_ddot)))
-        mj = float(jnp.max(jnp.abs(jm)))
+        ma = float(jnp.max(jnp.abs(a_long)))
+        ml = float(jnp.max(jnp.abs(a_lat)))
+        mj = float(jnp.max(jm))
 
         frames.append(dict(
             hx=np.array(hx), hy=np.array(hy), hv=np.array(hv),
             px=np.array(x_cart), py=np.array(y_cart), sp=np.array(v),
-            al=np.array(s_ddot), alat=np.array(d_ddot), jl=np.array(jm),
+            al=np.array(a_long), alat=np.array(a_lat), jl=np.array(jm),
             mo=ms, md=min_obs, ma=ma, ml=ml, mj=mj))
 
         # Warm-start: regenerate from current Frenet state.

@@ -105,42 +105,65 @@ class FrenetBSplineTrajectory:
         return self.ref_path.frenet_to_cartesian(s, d)
 
     # ═══════════════════════════════════════════════════════════════════
-    # Vehicle states [T, 8]:  x, y, v, ψ, a_long, a_lat, jerk_long, steer
+    # Vehicle states [T, 9]:  x, y, v, ψ, a_long, a_lat, j_long, j_lat, steer
     # ═══════════════════════════════════════════════════════════════════
 
     def to_vehicle_states(self, s, d, s_dot, d_dot,
                           s_ddot, d_ddot, s_dddot, d_dddot,
                           wheel_base=2.8):
-        """Convert Frenet kinematics to vehicle-state vector.
+        """Frenet → vehicle-frame kinematics with curvature coupling.
 
-        Frenet quantities are linear in control points.
-        Nonlinearities (sqrt, arctan, curvature→steer) are well-conditioned
-        and fine for black-box IGO optimization.
+        Correct transformation accounting for:
+          - (1-d·κ_r) Jacobian in longitudinal speed
+          - Centrifugal acceleration κ_r·v_t² in lateral direction
+          - Coriolis term 2·κ_r·ḃ·ḋ in tangential acceleration
+          - Frame rotation by Δψ for a_long / a_lat
+
+        All correction terms use the *given* reference path κ_r(s) —
+        not optimization variables — so they don't introduce instability.
+        For straight roads (κ_r=0) the formulas reduce to the simplified form.
         """
-        # Speed
-        v = jnp.sqrt(s_dot ** 2 + d_dot ** 2)
-        vs = v + 1e-6
-
         # Reference path geometry at s(t)
         _, _, θ_r, κ_r = self.ref_path.evaluate(s)
+        # κ_r' = dκ_r/ds — 0 for lines and circular arcs; ignored for now
 
-        # Vehicle heading: path heading + lateral-motion angle
-        # ψ = θ_r(s) + arctan(ḋ / ḃ)
-        psi = θ_r + jnp.arctan2(d_dot, s_dot)
+        # ── Velocity ────────────────────────────────────────────
+        # v = (1-d·κ_r)·ḃ·t + ḋ·n   in (t, n) basis
+        vt = (1.0 - d * κ_r) * s_dot        # tangential component
+        vn = d_dot                            # normal component
+        v2 = vt ** 2 + vn ** 2
+        v = jnp.sqrt(v2)
+        vs = v + 1e-6
 
-        # Acceleration in Frenet frame (= vehicle-frame for small Δθ)
-        # These are DIRECTLY d2B·ctrl — the key stability improvement
-        a_long = s_ddot
-        a_lat  = d_ddot
+        # Vehicle heading: ψ = θ_r + Δψ,  Δψ = arctan2(vn, vt)
+        dpsi = jnp.arctan2(vn, vt)
+        psi = θ_r + dpsi
+        cos_dpsi = vt / vs
+        sin_dpsi = vn / vs
 
-        # Jerk — directly d3B·ctrl
-        jerk_long = s_dddot
+        # ── Acceleration (reference-path tangential / normal) ──
+        # a_t = dv_t/dt - v_n·κ_r·ḃ
+        # a_n = d̈ + κ_r·v_t·ḃ    (centrifugal)
+        vt_dot = (1.0 - d * κ_r) * s_ddot - κ_r * s_dot * d_dot   # κ_r' term omitted
+        a_t = vt_dot - vn * κ_r * s_dot
+        a_n = d_ddot + κ_r * vt * s_dot
 
-        # Curvature of the actual vehicle trajectory
-        # κ = (ḃ·κ_r + d/dt(arctan(ḋ/ḃ))) / v
-        # d/dt(arctan(ḋ/ḃ)) = (ḃ·d̈ - s̈·ḋ) / v²
-        # For straight reference (κ_r=0): κ = (ḃ·d̈ - s̈·ḋ) / v³
-        dpsi_dt = s_dot * κ_r + (s_dot * d_ddot - s_ddot * d_dot) / (vs ** 2)
+        # ── Rotate to vehicle frame ────────────────────────────
+        # [a_long]   [ cosΔψ  sinΔψ] [a_t]
+        # [a_lat ] = [-sinΔψ  cosΔψ] [a_n]
+        a_long = a_t * cos_dpsi + a_n * sin_dpsi
+        a_lat  = -a_t * sin_dpsi + a_n * cos_dpsi
+
+        # ── Jerk: rotate Frenet jerk to vehicle frame ──────────
+        # Centrifugal jerk correction (2·κ_r·v·a_long) omitted for now.
+        j_long = s_dddot * cos_dpsi + d_dddot * sin_dpsi
+        j_lat  = -s_dddot * sin_dpsi + d_dddot * cos_dpsi
+
+        # ── Curvature & steer ──────────────────────────────────
+        # dψ/dt = κ_r·ḃ + d(Δψ)/dt
+        # d(Δψ)/dt = (vt·d̈ - vn·vt_dot) / v²
+        ddpsi_dt = (vt * d_ddot - vn * vt_dot) / v2
+        dpsi_dt = κ_r * s_dot + ddpsi_dt
         curvature = dpsi_dt / vs
         steer = jnp.arctan(curvature * wheel_base)
 
@@ -148,5 +171,5 @@ class FrenetBSplineTrajectory:
         x, y = self.to_cartesian(s, d)
 
         return jnp.stack([
-            x, y, v, psi, a_long, a_lat, jerk_long, steer,
+            x, y, v, psi, a_long, a_lat, j_long, j_lat, steer,
         ], axis=-1)

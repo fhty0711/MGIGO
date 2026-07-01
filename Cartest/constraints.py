@@ -1,17 +1,18 @@
 """Constraint builders for Frenet B-spline MPC.
 
-All kinematics constraints (jerk, acc, speed, lane) operate directly
-on Frenet quantities — linear in control points, no Cartesian projection.
+All kinematics constraints (acc, jerk, speed) use to_vehicle_states()
+— the correct Frenet→vehicle transformation with curvature coupling.
 
-Only obstacle checking goes through Frenet→Cartesian mapping.
+Lane and obstacle use Frenet / Cartesian directly (no curvature coupling needed).
+
+Per-sample penalty: max(max(0, |long|-LIM), max(0, |lat|-LIM))
+Only the *worse* component is penalised, not both.
 """
 
 from __future__ import annotations
 
 import jax.numpy as jnp
 from Constraintdealer.Constran import Deterministic
-
-from Cartest.cost import _eval_traj
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -26,25 +27,49 @@ OBS_SAFE_DIST = 2.0    # m     safety margin around obstacle
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════════
+
+def _eval_frenet(theta, ctx, gen):
+    """Unpack theta → evaluate Frenet trajectory.
+
+    theta = [ctrl_s_free(9) | ctrl_d_free(9)].
+    """
+    n = gen.n_free
+    return gen.evaluate(
+        theta[:n], theta[n:2 * n],
+        ctx["s0"], ctx["s_dot0"], ctx["s_ddot0"],
+        ctx["d0"], ctx["d_dot0"], ctx["d_ddot0"],
+    )
+
+
+def _eval_vehicle_states(theta, ctx, gen):
+    """Unpack theta → evaluate → vehicle states [T, 9]."""
+    s, d, s_dot, d_dot, s_ddot, d_ddot, s_dddot, d_dddot = _eval_frenet(theta, ctx, gen)
+    return gen.to_vehicle_states(s, d, s_dot, d_dot,
+                                 s_ddot, d_ddot, s_dddot, d_dddot)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Constraint factory
 # ═══════════════════════════════════════════════════════════════════════
 
 def make_constraints(gen):
     """Build constraint list for Frenet B-spline MPC.
 
-    Self-similar nesting: 小priority=内层(被后续σ·m放大, 影响大), 大priority=外层(直接输出)
-      P1 (内): obstacle  — 安全约束, 被放大4×, 天然最优先
+    Self-similar nesting: 小priority=内层(被后续σ·m放大), 大priority=外层(直接输出)
+      P1 (内): obstacle  — 安全约束, 天然最优先
       P2:     lane      — 车道约束
       P3:     speed     — 速度约束
       P4:     acc       — 加速度约束
-      P5 (外): jerk      — 控制输入, 直接输出, 不放大
+      P5 (外): jerk      — 控制输入, 直接输出
     安全(obs/lane)自然优先于舒适(jerk/acc) — 靠结构保证, 不靠参数调
     """
 
     def obs_g(theta, ctx):
-        """Obstacle penetration → max. 碰撞检测."""
-        s, d, _, _, _, _, _, _ = _eval_traj(theta, ctx, gen)
-        x, y = gen.to_cartesian(s, d)
+        """Obstacle penetration.  Cartesian distance via reference path."""
+        st = _eval_vehicle_states(theta, ctx, gen)
+        x, y = st[:, 0], st[:, 1]
         dx = x[:, None] - ctx["obs_pos"][None, :, 0]
         dy = y[:, None] - ctx["obs_pos"][None, :, 1]
         dist = jnp.sqrt(dx ** 2 + dy ** 2)
@@ -52,26 +77,44 @@ def make_constraints(gen):
         return jnp.min(pen, axis=-1)
 
     def lane_g(theta, ctx):
-        """Lane boundary |d| ≤ lane_hw. 直接用 d."""
-        _, d, _, _, _, _, _, _ = _eval_traj(theta, ctx, gen)
+        """Lane boundary |d| ≤ lane_hw.  d from Frenet directly."""
+        _, d, _, _, _, _, _, _ = _eval_frenet(theta, ctx, gen)
         return jnp.maximum(0., jnp.abs(d) - ctx["lane_hw"])
 
     def speed_g(theta, ctx):
-        """Speed V_MIN ≤ ḃ ≤ V_MAX. 直接用 s_dot."""
-        _, _, s_dot, _, _, _, _, _ = _eval_traj(theta, ctx, gen)
-        return jnp.maximum(0., jnp.maximum(V_MIN - s_dot, s_dot - V_MAX))
+        """Speed V_MIN ≤ v ≤ V_MAX.  v from to_vehicle_states."""
+        st = _eval_vehicle_states(theta, ctx, gen)
+        v = st[:, 2]
+        return jnp.maximum(
+            jnp.maximum(0., V_MIN - v),
+            jnp.maximum(0., v - V_MAX),
+        )
 
     def acc_g(theta, ctx):
-        """Acceleration |s̈|, |d̈| ≤ ACC_MAX. 直接用 s_ddot, d_ddot."""
-        _, _, _, _, s_ddot, d_ddot, _, _ = _eval_traj(theta, ctx, gen)
-        am = jnp.sqrt(s_ddot ** 2 + d_ddot ** 2)
-        return jnp.maximum(0., am - ACC_MAX)
+        """Acc: max(|long|-LIM, |lat|-LIM, |total|-LIM, 0) per sample."""
+        st = _eval_vehicle_states(theta, ctx, gen)
+        a_long, a_lat = st[:, 4], st[:, 5]
+        am = jnp.sqrt(a_long ** 2 + a_lat ** 2)
+        return jnp.maximum(
+            jnp.maximum(0., jnp.abs(a_long) - ACC_MAX),
+            jnp.maximum(
+                jnp.maximum(0., jnp.abs(a_lat) - ACC_MAX),
+                jnp.maximum(0., am            - ACC_MAX),
+            ),
+        )
 
     def jerk_g(theta, ctx):
-        """Jerk |s⃛|, |d⃛| ≤ JERK_MAX. 直接用 s_dddot, d_dddot."""
-        _, _, _, _, _, _, s_dddot, d_dddot = _eval_traj(theta, ctx, gen)
-        jm = jnp.sqrt(s_dddot ** 2 + d_dddot ** 2)
-        return jnp.maximum(0., jm - JERK_MAX)
+        """Jerk: max(|long|-LIM, |lat|-LIM, |total|-LIM, 0) per sample."""
+        st = _eval_vehicle_states(theta, ctx, gen)
+        j_long, j_lat = st[:, 6], st[:, 7]
+        jm = jnp.sqrt(j_long ** 2 + j_lat ** 2)
+        return jnp.maximum(
+            jnp.maximum(0., jnp.abs(j_long) - JERK_MAX),
+            jnp.maximum(
+                jnp.maximum(0., jnp.abs(j_lat) - JERK_MAX),
+                jnp.maximum(0., jm            - JERK_MAX),
+            ),
+        )
 
     return [
         # P1 (最内层): 避障 — baseline=2.0, 安全底线
