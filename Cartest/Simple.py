@@ -48,7 +48,7 @@ def run(steps=150, seed=0, plot=True):
     solver = build_solver(
         make_objective(gen, omega_s=1.0, omega_d=4.0, alpha=0.0), dims=(gen.n_free, gen.n_free),
         constraints=make_constraints(gen, lane_hw, safe_dist),
-        solver='m22', T=300, dt=0.3, K=3, B=64, B0=30, T_0=300,
+        solver='m22', T=300, dt=0.2, K=3, B=64, B0=30, T_0=300,
         k_inner=1.0, obj_transform='standard',
     )
 

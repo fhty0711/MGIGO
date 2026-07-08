@@ -53,17 +53,25 @@ def _eval_vehicle_states(theta, ctx, gen):
 # Constraint factory
 # ═══════════════════════════════════════════════════════════════════════
 
-def make_constraints(gen, lane_hw: float, obs_safe_dist: float):
+def make_constraints(gen, lane_hw: float, obs_safe_dist: float,
+                     acc_max: float | None = None,
+                     jerk_max: float | None = None):
     """Build constraint list for Frenet B-spline MPC.
 
-    Self-similar nesting: 小priority=内层(被后续σ·m放大), 大priority=外层(直接输出)
-      P1 (内): obstacle  — 安全约束, 天然最优先
-      P2:     lane      — 车道约束
-      P3:     speed     — 速度约束
-      P4:     acc       — 加速度约束
-      P5 (外): jerk      — 控制输入, 直接输出
-    安全(obs/lane)自然优先于舒适(jerk/acc) — 靠结构保证, 不靠参数调
+    Self-similar σ nesting, priority flows from inner → outer:
+      P5 (内): jerk      — 控制输入, 最内层, 直接约束轨迹
+      P4:      acc       — 加速度约束
+      P3:      speed     — 速度约束
+      P2:      lane      — 车道约束
+      P1 (外): obstacle  — 安全约束, 最外层包裹
+    外层约束满足时，内层约束的物理意义才成立。
+
+    Args:
+        acc_max:  override module‑level ACC_MAX (None → use default 5.0)
+        jerk_max: override module‑level JERK_MAX (None → use default 2.0)
     """
+    _acc_max = acc_max if acc_max is not None else ACC_MAX
+    _jerk_max = jerk_max if jerk_max is not None else JERK_MAX
 
     def obs_g(theta, ctx):
         """RSS: longitudinal + lateral safe distance per obstacle."""
@@ -113,10 +121,10 @@ def make_constraints(gen, lane_hw: float, obs_safe_dist: float):
         a_long, a_lat = st[:, 4], st[:, 5]
         am = jnp.sqrt(a_long ** 2 + a_lat ** 2)
         return jnp.maximum(
-            jnp.maximum(0., jnp.abs(a_long) - ACC_MAX),
+            jnp.maximum(0., jnp.abs(a_long) - _acc_max),
             jnp.maximum(
-                jnp.maximum(0., jnp.abs(a_lat) - ACC_MAX),
-                jnp.maximum(0., am            - ACC_MAX),
+                jnp.maximum(0., jnp.abs(a_lat) - _acc_max),
+                jnp.maximum(0., am            - _acc_max),
             ),
         )
 
@@ -126,10 +134,10 @@ def make_constraints(gen, lane_hw: float, obs_safe_dist: float):
         j_long, j_lat = st[:, 6], st[:, 7]
         jm = jnp.sqrt(j_long ** 2 + j_lat ** 2)
         return jnp.maximum(
-            jnp.maximum(0., jnp.abs(j_long) - JERK_MAX),
+            jnp.maximum(0., jnp.abs(j_long) - _jerk_max),
             jnp.maximum(
-                jnp.maximum(0., jnp.abs(j_lat) - JERK_MAX),
-                jnp.maximum(0., jm            - JERK_MAX),
+                jnp.maximum(0., jnp.abs(j_lat) - _jerk_max),
+                jnp.maximum(0., jm            - _jerk_max),
             ),
         )
 
