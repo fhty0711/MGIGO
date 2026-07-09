@@ -19,7 +19,7 @@ from numpy.testing import assert_allclose
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from Cartest.core.frenet_traj import FrenetBSplineTrajectory, make_frenet_reference
-from Cartest.core.reference_path import StraightReference, ReferencePath
+from Cartest.core.reference_path import StraightReference, CircularReference as CircularRefPath, ReferencePath
 from Cartest.execution.execute import execute_perfect_tracking, FrenetState
 
 BASIS = Path(__file__).resolve().parents[1] / "basis"
@@ -584,6 +584,71 @@ def test_curved_cruise_kinematics():
     assert_allclose(np.array(ref['d_dot_ref']), np.zeros(T), atol=1e-5)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# CircularReference (from reference_path) geometry tests
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_circular_reference_geometry():
+    """Verify CircularReference basic geometry from reference_path."""
+    R, cx, cy = 20.0, 0.0, 0.0
+    ref = CircularRefPath(R, cx, cy)
+
+    # s=0 at top: (0, R)
+    x, y, θ, κ = ref.evaluate(jnp.array([0.0]))
+    assert_allclose(x, 0.0, atol=1e-6)
+    assert_allclose(y, R, atol=1e-6)
+    assert_allclose(κ, 1.0 / R, atol=1e-6)
+
+    # s=πR/2 at right: (R, 0)
+    x, y, θ, κ = ref.evaluate(jnp.array([jnp.pi * R / 2]))
+    assert_allclose(x, R, atol=1e-4)
+    assert_allclose(y, 0.0, atol=1e-4)
+
+    # s=πR at bottom: (0, -R)
+    x, y, θ, κ = ref.evaluate(jnp.array([jnp.pi * R]))
+    assert_allclose(x, 0.0, atol=1e-4)
+    assert_allclose(y, -R, atol=1e-4)
+
+    # s=3πR/2 at left: (-R, 0)
+    x, y, θ, κ = ref.evaluate(jnp.array([3 * jnp.pi * R / 2]))
+    assert_allclose(x, -R, atol=1e-4)
+    assert_allclose(y, 0.0, atol=1e-4)
+
+    # arclength consistent: each quarter = 31.416m for R=20
+    assert_allclose(jnp.pi * R / 2, 31.4159265, atol=1e-4)
+
+
+def test_circular_reference_round_trip():
+    """cartesian_to_frenet ∘ evaluate = identity on CircularReference."""
+    R, cx, cy = 20.0, 0.0, 0.0
+    ref = CircularRefPath(R, cx, cy)
+
+    # Test at multiple arclengths
+    s_in = jnp.linspace(0, 2 * jnp.pi * R, 200)
+    x, y, θ_r, κ_r = ref.evaluate(s_in)
+    s_out, d_out = ref.cartesian_to_frenet(x, y)
+
+    # On centerline → d_out ≈ 0
+    assert_allclose(np.array(d_out), 0.0, atol=1e-5)
+    # s may wrap: s=0 and s=2πR are the same point
+    s_diff = np.minimum(np.abs(np.array(s_out) - np.array(s_in)),
+                        2 * np.pi * R - np.abs(np.array(s_out) - np.array(s_in)))
+    assert_allclose(s_diff, 0.0, atol=2e-5)  # float32 sin/cos precision
+
+    # Test with offsets: d ≠ 0
+    d_in = jnp.array([-3.0, 0.0, 2.5])
+    s_test = jnp.array([0.0, jnp.pi * R, 3 * jnp.pi * R / 2])
+    for si, di in zip(s_test, d_in):
+        x, y = ref.frenet_to_cartesian(si, di)
+        s_out, d_out = ref.cartesian_to_frenet(x, y)
+        assert_allclose(s_out, si, atol=1e-6)
+        assert_allclose(d_out, di, atol=1e-6)
+
+    # κ_r constant everywhere
+    _, _, _, κ_all = ref.evaluate(jnp.linspace(0, 100, 50))
+    assert_allclose(κ_all, 1.0 / R * jnp.ones(50), atol=1e-6)
+
+
 if __name__ == "__main__":
     test_from_vehicle_states_round_trip()
     print("✓ test_from_vehicle_states_round_trip passed")
@@ -632,5 +697,11 @@ if __name__ == "__main__":
 
     test_curved_cruise_kinematics()
     print("✓ test_curved_cruise_kinematics passed")
+
+    test_circular_reference_geometry()
+    print("✓ test_circular_reference_geometry passed")
+
+    test_circular_reference_round_trip()
+    print("✓ test_circular_reference_round_trip passed")
 
     print("\nAll tests passed.")

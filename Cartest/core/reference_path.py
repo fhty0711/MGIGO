@@ -63,3 +63,41 @@ class StraightReference(ReferencePath):
     def cartesian_to_frenet(self, x: jnp.ndarray, y: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         # Straight road: s = x, d = y
         return x, y
+
+
+class CircularReference(ReferencePath):
+    """Circular reference path parameterized by arc length.
+
+    s = 0 at the top (cx, cy + R), increasing counter-clockwise.
+    Positive d = outside the circle (standard Frenet left-normal convention).
+    """
+
+    def __init__(self, R: float, cx: float = 0.0, cy: float = 0.0):
+        self.R = R
+        self.cx = cx
+        self.cy = cy
+
+    def evaluate(self, s: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        θ = s / self.R
+        # s=0 at top (cx, cy+R), CCW:  x = R·sin(θ), y = R·cos(θ)
+        # Tangent: (cos(θ), −sin(θ)) → heading = atan2(−sin, cos) = −θ (mod 2π)
+        x_r = self.cx + self.R * jnp.sin(θ)
+        y_r = self.cy + self.R * jnp.cos(θ)
+        θ_r = -θ % (2 * jnp.pi)
+        κ_r = jnp.full_like(s, 1.0 / self.R)
+        return x_r, y_r, θ_r, κ_r
+
+    def cartesian_to_frenet(self, x: jnp.ndarray, y: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Closed-form inverse for circles.
+
+        s = R · atan2(x−cx, y−cy) mod 2πR  (swap x,y for sin/cos parameterization)
+        d = √((x−cx)² + (y−cy)²) − R        (positive d = outside circle, Frenet convention)
+        """
+        dx = x - self.cx
+        dy = y - self.cy
+        angle = jnp.arctan2(dx, dy)         # swap: sin↔cos in parameterization
+        angle = angle % (2 * jnp.pi)
+        s = self.R * angle
+        dist = jnp.sqrt(dx ** 2 + dy ** 2)
+        d = dist - self.R                      # positive d = outside circle (Frenet convention)
+        return s, d

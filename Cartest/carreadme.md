@@ -43,6 +43,8 @@ IGO 黑箱优化 + Constran 约束引擎。
                         └──────────────────┘
 ```
 
+> **注意**: 上图是当前已实现的**单阶段**管线。两阶段优化架构（Phase 1 探索 + Phase 2 精炼, 以及正反变换在其中的角色）的设计文档见 **[two_phase_design.md](two_phase_design.md)**。两阶段代码尚未实现。
+
 **核心管线**：
 - **正变换** `to_vehicle_states`: Frenet (s,d) → 车辆状态 (x,y,v,ψ,a_long,a_lat,…)，含曲率耦合
 - **反变换** `from_vehicle_states`: 车辆状态 → Frenet，用于从地图/外部参考反解 `z_ref`
@@ -490,6 +492,8 @@ ctrl_s, ctrl_d = result.x[:gen.n_free], result.x[gen.n_free:]
 支持 GMM 状态继承：`solver(key, context=ctx, warm_start=prev_result)`。
 
 ### 两阶段分步优化
+
+> **状态**: 以下为设计方案，**代码尚未实现**。详细设计、实现计划与验证路径见 **[two_phase_design.md](two_phase_design.md)**。
 
 完整规划问题（全局路径 + 精细跟踪 + 物理约束）很难在单个 IGO 中一次求解。
 方案是用**同一套 B-spline 基**拆成两个阶段，通过 `solver_modes` 切换求解器配置。

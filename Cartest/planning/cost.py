@@ -56,10 +56,11 @@ def make_objective(gen, omega_s: float = 1.0, omega_d: float = 1.0,
                    alpha: float = 0.5):
     """Coupled s/d Lyapunov cost — both channels track position errors.
 
-    e = [es, ed]  with  es = s−s_ref,  ed = d
+    e = [es, ed]  with  es = s−s_ref,  ed = d−d_ref
 
-    s_ref_dot(t) = v_tgt + (v0 − v_tgt)·e^(−ω_s·t)
-    s_ref(t)     = s0 + v_tgt·t + (v0−v_tgt)/ω_s · (1−e^(−ω_s·t))
+    If ctx contains 'z_ref' (dict with s_ref, s_dot_ref, s_ddot_ref,
+    d_ref, d_dot_ref, d_ddot_ref as [T] arrays), use it directly.
+    Otherwise fall back to hardcoded exponential speed profile + d_ref=0.
 
     α² < ω_s·ω_d  ensures K ≻ 0.
     """
@@ -69,27 +70,40 @@ def make_objective(gen, omega_s: float = 1.0, omega_d: float = 1.0,
     def obj_fn(theta, ctx):
         s, d, d_dot, d_ddot, d_dddot, s_dot, s_ddot, s_dddot = _eval_all(theta, ctx, gen)
 
-        v_tgt = ctx["v_ref"][0]
-        s0    = ctx["s0"]
-        v0    = ctx["s_dot0"]
-        dv    = v0 - v_tgt                              # speed gap (negative if accelerating)
-        lam   = omega_s
-        exp_term = jnp.exp(-lam * t_arr)                 # [T]
-        s_ref      = s0 + v_tgt * t_arr + dv / lam * (1.0 - exp_term)
-        s_ref_dot  = v_tgt + dv * exp_term
-        s_ref_ddot = -dv * lam * exp_term
+        # ── Reference: ctx z_ref or hardcoded fallback ──
+        z_ref = ctx.get('z_ref')
+        if z_ref is not None:
+            s_ref      = z_ref['s_ref']
+            s_ref_dot  = z_ref['s_dot_ref']
+            s_ref_ddot = z_ref['s_ddot_ref']
+            d_ref      = z_ref['d_ref']
+            d_ref_dot  = z_ref['d_dot_ref']
+            d_ref_ddot = z_ref['d_ddot_ref']
+        else:
+            v_tgt = ctx["v_ref"][0]
+            s0    = ctx["s0"]
+            v0    = ctx["s_dot0"]
+            dv    = v0 - v_tgt
+            lam   = omega_s
+            exp_term = jnp.exp(-lam * t_arr)
+            s_ref      = s0 + v_tgt * t_arr + dv / lam * (1.0 - exp_term)
+            s_ref_dot  = v_tgt + dv * exp_term
+            s_ref_ddot = -dv * lam * exp_term
+            d_ref      = jnp.zeros_like(s)
+            d_ref_dot  = jnp.zeros_like(s)
+            d_ref_ddot = jnp.zeros_like(s)
 
-        # position errors (both channels symmetric now)
+        # ── position errors ──
         es = s - s_ref
-        ed = d
+        ed = d - d_ref
 
-        es_dot = s_dot   - s_ref_dot
-        ed_dot = d_dot
+        es_dot = s_dot - s_ref_dot
+        ed_dot = d_dot - d_ref_dot
 
-        es_ddot = s_ddot  - s_ref_ddot
-        ed_ddot = d_ddot
+        es_ddot = s_ddot - s_ref_ddot
+        ed_ddot = d_ddot - d_ref_ddot
 
-        # K matrix and coupling (same as before)
+        # K matrix and coupling
         K00, K01 = omega_s, alpha
         K10, K11 = alpha,   omega_d
 
