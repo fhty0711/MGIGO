@@ -12,15 +12,21 @@ from jax import random
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from Cartest.core.frenet_traj import FrenetBSplineTrajectory
-from Cartest.core.reference_path import StraightReference
 from Cartest.planning.warmstart import build_initial_mu
-from Cartest.planning.cost import make_objective, build_context
+from Cartest.planning.cost import build_context
 from Cartest.execution.execute import execute_perfect_tracking
 from Cartest.planning.constraints import make_constraints, compute_g_values, compute_summary
 from Cartest.eval.reporting import StepReport
 from Cartest.eval.plotting import setup_axes, render_frame, save_animation
 from Cartest.eval.diagnostics import diagnose, print_diag
-from Cartest.planning.scenario import EMPTY as scenario
+from Cartest.planning.scenarios import (
+    SCENARIOS, get_scenario, make_initial_state,
+    build_obstacle_predictions, first_frame_obstacles,
+)
+from Cartest.planning.costs import (
+    make_objective_from_scenario,
+    make_constraint_config_from_scenario,
+)
 from gmm_igo.solver_builder import build_solver
 
 
@@ -32,36 +38,40 @@ BASIS = ROOT / "basis"
 # MPC
 # ═══════════════════════════════════════════════════════════════════════
 
-def run(steps=150, seed=0, plot=True):
-    ref_path = StraightReference()
+def run(steps=150, seed=0, plot=True, scenario_name="empty"):
+    scenario = get_scenario(scenario_name)
+    ref_path = scenario["ref_path"]
     gen = FrenetBSplineTrajectory(BASIS / "bspline_basis.npz", ref_path)
 
     # Build solver ONCE
     # ── Scenario ──
-    obs_list  = scenario["obstacles"]
-    lane_hw   = scenario["lane_hw"]
-    safe_dist = scenario["obs_safe_dist"]
-    v_target  = scenario["v_target"]
-    obs_pos = jnp.array([[o["x"], o["y"]] for o in obs_list], dtype=jnp.float32)
-    obs_rad = jnp.array([o["r"] for o in obs_list], dtype=jnp.float32)
+    road = scenario["road"]
+    safety = scenario["safety"]
+    lane_hw = road["lane_hw"]
+    lane_bounds_d = road.get("lane_bounds_d", (-lane_hw, lane_hw))
+    safe_dist = safety["obs_safe_dist"]
+    v_target = scenario["behavior"]["v_target"]
+    obs_pos, obs_rad = build_obstacle_predictions(scenario, gen)
+    obs_list = first_frame_obstacles(obs_pos, obs_rad)
+
+    constraint_cfg = make_constraint_config_from_scenario(scenario)
+    constran_cfg = constraint_cfg["constran"]
 
     solver = build_solver(
-        make_objective(gen, omega_s=1.0, omega_d=4.0, alpha=0.0), dims=(gen.n_free, gen.n_free),
-        constraints=make_constraints(gen, lane_hw, safe_dist),
+        make_objective_from_scenario(gen, scenario),
+        dims=(gen.n_free, gen.n_free),
+        constraints=make_constraints(gen, road, safety, constraint_cfg),
         solver='m22', T=300, dt=0.2, K=3, B=64, B0=30, T_0=300,
-        k_inner=1.0, obj_transform='standard',
+        k_inner=constran_cfg["k_inner"], obj_transform=constran_cfg["obj_transform"],
     )
 
     key = random.PRNGKey(seed)
 
-    from Cartest.execution.execute import FrenetState
-    init = scenario["init"]
-    state = FrenetState(s=init["s"], s_dot=init["s_dot"], s_ddot=init["s_ddot"],
-                        d=init["d"], d_dot=init["d_dot"], d_ddot=init["d_ddot"],
-                        psi=init.get("psi", 0.0))
+    state = make_initial_state(scenario)
 
     # ── JIT warm‑up: compile all JAX functions before the first timed step ──
-    ctx_warm = build_context(gen, state, v_target, lane_hw, obs_pos, obs_rad)
+    ctx_warm = build_context(gen, state, v_target, lane_hw, obs_pos, obs_rad,
+                             lane_bounds_d=lane_bounds_d)
     mu_warm = build_initial_mu(gen, state.s, state.s_dot, state.d)
     _ = solver(random.PRNGKey(999), context=ctx_warm, initial_mu=mu_warm)
 
@@ -74,7 +84,9 @@ def run(steps=150, seed=0, plot=True):
     for step in range(steps):
         key, sk = random.split(key)
 
-        ctx = build_context(gen, state, v_target, lane_hw, obs_pos, obs_rad)
+        obs_pos, obs_rad = build_obstacle_predictions(scenario, gen, mpc_time=step * gen.dt)
+        ctx = build_context(gen, state, v_target, lane_hw, obs_pos, obs_rad,
+                            lane_bounds_d=lane_bounds_d)
         mu_init = build_initial_mu(gen, state.s, state.s_dot, state.d)
 
         t0 = time.time()
@@ -83,12 +95,12 @@ def run(steps=150, seed=0, plot=True):
 
         ctrl_s, ctrl_d = result.x[:gen.n_free], result.x[gen.n_free:]
 
-        # Evaluate plan → Frenet + vehicle states + Cartesian (one call)
+        # Evaluate plan -> Frenet + vehicle states + Cartesian (one call)
         frenet, st, (x_cart, y_cart) = gen.evaluate_plan(ctrl_s, ctrl_d, ctx)
         s, d, s_dot, d_dot, s_ddot, d_ddot, s_dddot, d_dddot = frenet
 
         # Metrics
-        gv = compute_g_values(st, d, x_cart, y_cart, obs_pos, obs_rad, lane_hw, safe_dist)
+        gv = compute_g_values(st, d, x_cart, y_cart, obs_pos, obs_rad, lane_hw, safety)
         sm = compute_summary(st, d, x_cart, y_cart, obs_pos, obs_rad)
 
         # Execute: use plan's predicted next state (perfect tracking)
@@ -126,12 +138,18 @@ def run(steps=150, seed=0, plot=True):
 
 def _parse():
     p = argparse.ArgumentParser()
+    p.add_argument("scenario", nargs="?", choices=tuple(sorted(SCENARIOS)),
+                   help="scenario name")
     p.add_argument("--steps", type=int, default=150)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--scenario", dest="scenario_flag",
+                   choices=tuple(sorted(SCENARIOS)))
     p.add_argument("--no-plot", action="store_true")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse()
-    run(steps=args.steps, seed=args.seed, plot=not args.no_plot)
+    scenario_name = args.scenario_flag or args.scenario or "empty"
+    run(steps=args.steps, seed=args.seed, plot=not args.no_plot,
+        scenario_name=scenario_name)

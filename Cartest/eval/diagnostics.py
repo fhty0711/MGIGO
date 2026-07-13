@@ -1,7 +1,7 @@
-"""Cost diagnostics — raw values + actual cost, no manual nesting trace.
+"""Cost diagnostics - raw objective terms and raw constraint violations.
 
-Reports what the optimizer actually sees: raw objective, constraint
-violations, and the resulting Constran-built cost.
+Reports the untransformed Lyapunov objective terms and per-constraint g values.
+The Constran-built bounded cost is already printed from SolverResult.cost.
 """
 
 from __future__ import annotations
@@ -10,11 +10,12 @@ import jax.numpy as jnp
 import numpy as np
 
 
-def diagnose(gen, theta, ctx, obs_safe_dist: float = 0.5, state=None):
+def diagnose(gen, theta, ctx, obs_safe_dist: float = 0.5, state=None,
+             omega_s: float = 1.0, omega_d: float = 4.0, alpha: float = 0.0):
     """Extract raw values behind the Constran-built cost.
 
-    Does NOT manually trace the nesting — just reports raw objective
-    and per-constraint g_raw so we can see what the optimizer is fighting.
+    Reports the raw Lyapunov objective (matching make_objective) and
+    per-constraint g_raw so we can see what the optimizer is fighting.
     If *state* (FrenetState) is given, also shows vehicle's current distance.
     """
     n = gen.n_free
@@ -31,14 +32,38 @@ def diagnose(gen, theta, ctx, obs_safe_dist: float = 0.5, state=None):
     j_long, j_lat = st[:, 6], st[:, 7]
     x_cart, y_cart = gen.to_cartesian(s, d)
 
-    # ── Raw objective (matches cost.py: error-dynamics poly) ──
-    w_s, w_d = 1.0, 1.0
-    ev = s_dot - ctx["v_ref"]
-    poly_s = s_ddot + 2.0 * w_s * ev
-    raw_spd = float(jnp.sum(poly_s ** 2) + 0.2 * w_s ** 2 * jnp.sum(ev ** 2))
-    poly_d = (s_dddot + 3.0 * w_d * s_ddot
-              + 3.0 * w_d ** 2 * d_dot + w_d ** 3 * d)
-    raw_lat = float(jnp.sum(poly_d ** 2) + 0.3 * w_d ** 4 * jnp.sum(d_dot ** 2))
+    # ── Raw objective (matches planning/cost.py::make_objective) ──
+    t_arr = jnp.arange(gen.T) * gen.dt
+    v_tgt = ctx["v_ref"][0]
+    s0 = ctx["s0"]
+    v0 = ctx["s_dot0"]
+    dv = v0 - v_tgt
+    exp_term = jnp.exp(-omega_s * t_arr)
+    s_ref = s0 + v_tgt * t_arr + dv / omega_s * (1.0 - exp_term)
+    s_ref_dot = v_tgt + dv * exp_term
+    s_ref_ddot = -dv * omega_s * exp_term
+
+    es = s - s_ref
+    ed = d
+    es_dot = s_dot - s_ref_dot
+    ed_dot = d_dot
+    es_ddot = s_ddot - s_ref_ddot
+    ed_ddot = d_ddot
+
+    K00, K01 = omega_s, alpha
+    K10, K11 = alpha, omega_d
+    K2_00 = K00**2 + K01*K10
+    K2_01 = K00*K01 + K01*K11
+    K2_10 = K10*K00 + K11*K10
+    K2_11 = K10*K01 + K11**2
+
+    v1_s = es_dot + K00*es + K01*ed
+    v1_d = ed_dot + K10*es + K11*ed
+    v2_s = es_ddot + 2.0*(K00*es_dot + K01*ed_dot) + K2_00*es + K2_01*ed
+    v2_d = ed_ddot + 2.0*(K10*es_dot + K11*ed_dot) + K2_10*es + K2_11*ed
+
+    raw_spd = float(jnp.sum(es**2 + v1_s**2 + v2_s**2))
+    raw_lat = float(jnp.sum(ed**2 + v1_d**2 + v2_d**2))
     raw_obj = raw_spd + raw_lat
 
     # ── Raw g values (before T_alpha) ──
@@ -51,28 +76,49 @@ def diagnose(gen, theta, ctx, obs_safe_dist: float = 0.5, state=None):
                     jnp.maximum(jnp.maximum(0., jnp.abs(a_lat) - 5.0),
                                 jnp.maximum(0., am - 5.0)))))
     g_jerk_max = float(jnp.max(
-        jnp.maximum(jnp.maximum(0., jnp.abs(j_long) - 5.0),
-                    jnp.maximum(jnp.maximum(0., jnp.abs(j_lat) - 5.0),
-                                jnp.maximum(0., jm - 5.0)))))
-    g_lane_max = float(jnp.max(jnp.maximum(0., jnp.abs(d) - ctx["lane_hw"])))
-    if ctx["obs_pos"].shape[0] == 0:
+        jnp.maximum(jnp.maximum(0., jnp.abs(j_long) - 2.0),
+                    jnp.maximum(jnp.maximum(0., jnp.abs(j_lat) - 2.0),
+                                jnp.maximum(0., jm - 2.0)))))
+
+    bounds = ctx.get("lane_bounds_d")
+    if bounds is not None:
+        g_lane_max = float(jnp.max(
+            jnp.maximum(jnp.maximum(0., bounds[0] - d),
+                        jnp.maximum(0., d - bounds[1]))
+        ))
+    else:
+        g_lane_max = float(jnp.max(jnp.maximum(0., jnp.abs(d) - ctx["lane_hw"])))
+
+    n_obs = ctx["obs_pos"].shape[1] if ctx["obs_pos"].ndim == 3 else ctx["obs_pos"].shape[0]
+    if n_obs == 0:
         g_obs_max = 0.0
     else:
         rho = obs_safe_dist
         d_rss = v * rho + v ** 2 / (2.0 * 8.0)
-        dx = x_cart[:, None] - ctx["obs_pos"][None, :, 0]
-        dy = y_cart[:, None] - ctx["obs_pos"][None, :, 1]
-        r  = ctx["obs_rad"][None, :]
+        if ctx["obs_pos"].ndim == 3:
+            dx = x_cart[:, None] - ctx["obs_pos"][:, :, 0]
+            dy = y_cart[:, None] - ctx["obs_pos"][:, :, 1]
+            r  = ctx["obs_rad"]
+        else:
+            dx = x_cart[:, None] - ctx["obs_pos"][None, :, 0]
+            dy = y_cart[:, None] - ctx["obs_pos"][None, :, 1]
+            r  = ctx["obs_rad"][None, :]
         pen_x = jnp.maximum(0., d_rss[:, None] + r - jnp.abs(dx))
         pen_y = jnp.maximum(0., r - jnp.abs(dy))
         g_obs_max = float(jnp.max(jnp.maximum(pen_x, pen_y)))
 
     # Vehicle's current distance to nearest obstacle
     cur_dist = None
-    if state is not None and ctx["obs_pos"].shape[0] > 0:
-        cur_dx = state.s - ctx["obs_pos"][:, 0]
-        cur_dy = state.d - ctx["obs_pos"][:, 1]
-        cur_dist = float(jnp.min(jnp.sqrt(cur_dx ** 2 + cur_dy ** 2) - ctx["obs_rad"]))
+    if state is not None and n_obs > 0:
+        if ctx["obs_pos"].ndim == 3:
+            cur_dx = state.s - ctx["obs_pos"][0, :, 0]
+            cur_dy = state.d - ctx["obs_pos"][0, :, 1]
+            cur_r = ctx["obs_rad"][0]
+        else:
+            cur_dx = state.s - ctx["obs_pos"][:, 0]
+            cur_dy = state.d - ctx["obs_pos"][:, 1]
+            cur_r = ctx["obs_rad"]
+        cur_dist = float(jnp.min(jnp.sqrt(cur_dx ** 2 + cur_dy ** 2) - cur_r))
 
     return {
         'raw_obj': raw_obj,

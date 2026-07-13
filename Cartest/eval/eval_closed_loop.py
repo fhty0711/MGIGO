@@ -20,12 +20,15 @@ from jax import random
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from Cartest.core.frenet_traj import FrenetBSplineTrajectory
-from Cartest.core.reference_path import StraightReference
 from Cartest.planning.warmstart import build_initial_mu
-from Cartest.planning.cost import make_objective, build_context
-from Cartest.execution.execute import execute_perfect_tracking, FrenetState
+from Cartest.planning.cost import build_context
+from Cartest.execution.execute import execute_perfect_tracking
 from Cartest.planning.constraints import make_constraints, compute_g_values, compute_summary
-from Cartest.planning.scenario import EMPTY as scenario
+from Cartest.planning.scenarios import (
+    get_scenario, make_initial_state,
+    build_obstacle_predictions, SCENARIOS,
+)
+from Cartest.planning.costs import make_objective_from_scenario, make_constraint_config_from_scenario
 from gmm_igo.solver_builder import build_solver
 
 BASIS = Path(__file__).resolve().parents[1] / "basis"
@@ -38,9 +41,9 @@ class EvalMetrics:
     cost:          float
     d_trajectory:  list[float] = field(default_factory=list)
     v_trajectory:  list[float] = field(default_factory=list)
-    overshoot_d:   float = 0.0            # max(0, |d| - d_target) if applicable
-    oscillation_d: float = 0.0            # trailing std of d
-    oscillation_v: float = 0.0            # trailing std of v
+    overshoot_d:   float = 0.0
+    oscillation_d: float = 0.0
+    oscillation_v: float = 0.0
     g_obs:         float = 0.0
     g_lane:        float = 0.0
     g_speed:       float = 0.0
@@ -58,40 +61,32 @@ class EvalMetrics:
         }
 
 
-def run_eval(steps=150, seed=0, window=20):
-    """Run MPC with closed-loop evaluation.
-
-    Args:
-        steps:  number of MPC iterations
-        seed:   RNG seed
-        window: trailing window size for oscillation metric
-
-    Returns:
-        list of EvalMetrics, one per step.
-    """
-    ref_path = StraightReference()
+def run_eval(steps=150, seed=0, window=20, scenario_name="empty"):
+    """Run MPC with closed-loop evaluation."""
+    scenario = get_scenario(scenario_name)
+    ref_path = scenario["ref_path"]
     gen = FrenetBSplineTrajectory(BASIS / "bspline_basis.npz", ref_path)
 
-    obs_list  = scenario["obstacles"]
-    lane_hw   = scenario["lane_hw"]
-    safe_dist = scenario["obs_safe_dist"]
-    v_target  = scenario["v_target"]
-    obs_pos = jnp.array([[o["x"], o["y"]] for o in obs_list], dtype=jnp.float32)
-    obs_rad = jnp.array([o["r"] for o in obs_list], dtype=jnp.float32)
+    road = scenario["road"]
+    safety = scenario["safety"]
+    lane_hw = road["lane_hw"]
+    lane_bounds_d = road.get("lane_bounds_d", (-lane_hw, lane_hw))
+    safe_dist = safety["obs_safe_dist"]
+    v_target = scenario["behavior"]["v_target"]
+    obs_pos, obs_rad = build_obstacle_predictions(scenario, gen)
+    constraint_cfg = make_constraint_config_from_scenario(scenario)
+    constran_cfg = constraint_cfg["constran"]
 
     solver = build_solver(
-        make_objective(gen, omega_s=1.0, omega_d=4.0, alpha=0.0),
+        make_objective_from_scenario(gen, scenario),
         dims=(gen.n_free, gen.n_free),
-        constraints=make_constraints(gen, lane_hw, safe_dist),
+        constraints=make_constraints(gen, road, safety, constraint_cfg),
         solver='m22', T=300, dt=0.3, K=3, B=64, B0=30, T_0=300,
-        k_inner=1.0, obj_transform='standard',
+        k_inner=constran_cfg["k_inner"], obj_transform=constran_cfg["obj_transform"],
     )
 
     key = random.PRNGKey(seed)
-    init = scenario["init"]
-    state = FrenetState(s=init["s"], s_dot=init["s_dot"], s_ddot=init["s_ddot"],
-                        d=init["d"], d_dot=init["d_dot"], d_ddot=init["d_ddot"],
-                        psi=init.get("psi", 0.0))
+    state = make_initial_state(scenario)
 
     hx, hy, hv = [state.s], [state.d], [state.s_dot]
     all_metrics = []
@@ -111,28 +106,22 @@ def run_eval(steps=150, seed=0, window=20):
         s, d, s_dot, d_dot, s_ddot, d_ddot, s_dddot, d_dddot = frenet
 
         gv = compute_g_values(st, d, x_cart, y_cart, obs_pos, obs_rad,
-                              lane_hw, safe_dist)
+                              lane_hw, safety)
 
-        # Execute
         state = execute_perfect_tracking(s, d, s_dot, d_dot, s_ddot, d_ddot,
                                          st[1, 3])
         hx.append(state.s); hy.append(state.d); hv.append(state.s_dot)
 
-        # ── Compute metrics ──────────────────────────────────────
         m = EvalMetrics(step=step, cost=float(result.cost))
-
-        # Overshoot: |d| beyond lane_hw (or target lane center)
         d_abs = float(jnp.max(jnp.abs(d)))
         m.overshoot_d = max(0.0, d_abs - lane_hw)
 
-        # Oscillation: trailing std of d and v
         hy_arr = np.array(hy[-window:])
         hv_arr = np.array(hv[-window:])
         if len(hy_arr) >= 5:
             m.oscillation_d = float(np.std(hy_arr))
             m.oscillation_v = float(np.std(hv_arr))
 
-        # Constraint violations
         m.g_obs   = float(gv['obs'])
         m.g_lane  = float(gv['lane'])
         m.g_speed = float(gv['spd'])
@@ -141,7 +130,6 @@ def run_eval(steps=150, seed=0, window=20):
 
         all_metrics.append(m)
 
-        # Progress
         if step % 10 == 0:
             viol = sum(1 for v in [m.g_obs, m.g_lane, m.g_speed, m.g_acc, m.g_jerk] if v > 0)
             print(f"[{step:3d}] cost={m.cost:6.2f}  "
@@ -163,7 +151,6 @@ def print_summary(metrics):
     g_acc = [m.g_acc for m in metrics]
     g_jerk = [m.g_jerk for m in metrics]
 
-    # Steady-state: last 30 steps
     ss = slice(-30, None)
 
     print("\n" + "=" * 60)
@@ -181,7 +168,6 @@ def print_summary(metrics):
           f"speed={np.max(g_speed):.4f}  acc={np.max(g_acc):.4f}  "
           f"jerk={np.max(g_jerk):.4f}")
 
-    # Summary verdict
     ok = True
     if np.max(g_obs) > 0:
         print("  ⚠ obstacle violated"); ok = False
@@ -197,6 +183,8 @@ def print_summary(metrics):
 
 def _parse():
     p = argparse.ArgumentParser()
+    p.add_argument("scenario", nargs="?", choices=tuple(sorted(SCENARIOS)),
+                   default="empty")
     p.add_argument("--steps", type=int, default=150)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--window", type=int, default=20,
@@ -207,5 +195,7 @@ def _parse():
 if __name__ == "__main__":
     args = _parse()
     metrics, hx, hy, hv = run_eval(steps=args.steps, seed=args.seed,
-                                   window=args.window)
+                                   window=args.window, scenario_name=args.scenario)
     print_summary(metrics)
+        ctx = build_context(gen, state, v_target, lane_hw, obs_pos, obs_rad,
+                            lane_bounds_d=lane_bounds_d)

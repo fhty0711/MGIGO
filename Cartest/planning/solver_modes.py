@@ -24,6 +24,7 @@ from jax import random
 
 from Cartest.planning.constraints import make_constraints as _make_constraints
 from Constraintdealer.Constran import Deterministic
+from Cartest.planning.costs.default_lyapunov import DEFAULT_CONSTRAINTS
 from gmm_igo.solver_builder import build_solver
 
 
@@ -39,15 +40,15 @@ def build_p2_constraints(gen, lane_hw, safe_dist, acc_max=5.0, jerk_max=2.0):
     from Cartest.planning.constraints import _eval_frenet, _eval_vehicle_states
 
     def _obs_g(theta, ctx):
-        n_obs = ctx['obs_pos'].shape[0]
+        n_obs = ctx['obs_pos'].shape[1]
         if n_obs == 0:
             return jnp.zeros(gen.T)
         st = _eval_vehicle_states(theta, ctx, gen)
         x, y, v = st[:, 0], st[:, 1], st[:, 2]
         d_rss = v * safe_dist + v ** 2 / 16.0
-        dx = x[:, None] - ctx['obs_pos'][None, :, 0]
-        dy = y[:, None] - ctx['obs_pos'][None, :, 1]
-        r_obs = ctx['obs_rad'][None, :]
+        dx = x[:, None] - ctx['obs_pos'][:, :, 0]
+        dy = y[:, None] - ctx['obs_pos'][:, :, 1]
+        r_obs = ctx['obs_rad']
         pen_x = jnp.maximum(0., d_rss[:, None] + r_obs - jnp.abs(dx))
         pen_y = jnp.maximum(0., r_obs - jnp.abs(dy))
         return jnp.maximum(pen_x, pen_y).max(axis=-1)
@@ -156,8 +157,10 @@ def build_two_phase_solver(
             ctx['d0'], ctx['d_dot0'], ctx['d_ddot0'])
         return jnp.sum((s_dot - v_target) ** 2)
 
-    p1_cons = _make_constraints(gen, lane_hw, safe_dist,
-                                acc_max=p1_acc_max, jerk_max=p1_jerk_max)
+    p1_cons = _make_constraints(gen, {"lane_hw": lane_hw},
+                                {"obs_safe_dist": safe_dist,
+                                 "acc_max": p1_acc_max, "jerk_max": p1_jerk_max},
+                                DEFAULT_CONSTRAINTS)
     sp1 = build_solver(
         p1_obj, dims=(n_free, n_free), constraints=p1_cons,
         solver='m22', T=p1_T, dt=p1_dt, K=K,

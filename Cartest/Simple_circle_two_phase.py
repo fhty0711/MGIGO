@@ -1,7 +1,7 @@
 """Level 1a: Two-phase MPC on CircularReference.
 
-Phase 1: loose constraints (exploration) → warm-start for Phase 2
-Phase 2: tight constraints (refinement) → execution trajectory
+Phase 1: loose constraints (exploration) -> warm-start for Phase 2
+Phase 2: tight constraints (refinement) -> execution trajectory
 """
 
 from __future__ import annotations
@@ -21,7 +21,8 @@ from Cartest.planning.warmstart import build_initial_mu
 from Cartest.planning.cost import make_objective, build_context
 from Cartest.execution.execute import execute_perfect_tracking, FrenetState
 from Cartest.planning.constraints import make_constraints
-from Cartest.planning.scenario import EMPTY as scenario
+from Cartest.planning.scenarios import get_scenario, make_initial_state, build_obstacle_predictions
+from Cartest.planning.costs.default_lyapunov import DEFAULT_CONSTRAINTS
 from gmm_igo.solver_builder import build_solver
 
 ROOT = Path(__file__).resolve().parent
@@ -32,18 +33,19 @@ def run_two_phase(R=100.0, steps=60, seed=42):
     ref_path = CircularReference(R, 0.0, 0.0)
     gen = FrenetBSplineTrajectory(BASIS / "bspline_basis.npz", ref_path)
 
-    obs_list = scenario["obstacles"]
-    lane_hw = 4.0
-    safe_dist = 0.1
-    v_target = 18.0
-    obs_pos = jnp.zeros((0, 2), dtype=jnp.float32)
-    obs_rad = jnp.zeros(0, dtype=jnp.float32)
+    scenario = get_scenario("circle_track")
+    road = scenario["road"]
+    safety = scenario["safety"]
+    lane_hw = road["lane_hw"]
+    safe_dist = safety["obs_safe_dist"]
+    v_target = scenario["behavior"]["v_target"]
+    obs_pos, obs_rad = build_obstacle_predictions(scenario, gen)
 
     # ── Phase 1 solver: loose constraints ──
     solver_p1 = build_solver(
         make_objective(gen, omega_s=1.0, omega_d=4.0, alpha=0.0),
         dims=(gen.n_free, gen.n_free),
-        constraints=make_constraints(gen, lane_hw, safe_dist, acc_max=5.0, jerk_max=2.0),
+        constraints=make_constraints(gen, road, safety, DEFAULT_CONSTRAINTS),
         solver='m22', T=300, dt=0.25, K=3, B=128, B0=50, T_0=100,
         k_inner=1.0, obj_transform='standard',
     )
@@ -52,16 +54,16 @@ def run_two_phase(R=100.0, steps=60, seed=42):
     solver_p2 = build_solver(
         make_objective(gen, omega_s=1.0, omega_d=4.0, alpha=0.0),
         dims=(gen.n_free, gen.n_free),
-        constraints=make_constraints(gen, lane_hw, safe_dist, acc_max=5.0, jerk_max=2.0),
+        constraints=make_constraints(gen, road, safety, DEFAULT_CONSTRAINTS),
         solver='m22', T=300, dt=0.20, K=3, B=64, B0=30, T_0=300,
         k_inner=1.0, obj_transform='standard',
     )
 
     key = random.PRNGKey(seed)
-    init = scenario["init"]
-    state = FrenetState(s=init["s"], s_dot=init["s_dot"], s_ddot=init["s_ddot"],
-                        d=-3.0, d_dot=init["d_dot"], d_ddot=init["d_ddot"],
-                        psi=init.get("psi", 0.0))
+    state = make_initial_state(scenario)
+    state = FrenetState(s=state.s, s_dot=state.s_dot, s_ddot=state.s_ddot,
+                        d=-3.0, d_dot=state.d_dot, d_ddot=state.d_ddot,
+                        psi=state.psi)
 
     # ── Warmup ──
     ctx_warm = build_context(gen, state, v_target, lane_hw, obs_pos, obs_rad)
@@ -123,8 +125,8 @@ def run_two_phase(R=100.0, steps=60, seed=42):
     settle = next((i for i in range(5, len(d_arr))
                    if all(abs(d_arr[j]) < 0.1 for j in range(i, min(i+5, len(d_arr))))), steps)
 
-    print(f"\nR={R}: d={d_arr[0]:.0f}→{d_arr[-1]:.2f} settle={settle*0.1:.1f}s "
-          f"v={v_arr[0]:.0f}→{v_arr[-1]:.1f} "
+    print(f"\nR={R}: d={d_arr[0]:.0f}->{d_arr[-1]:.2f} settle={settle*0.1:.1f}s "
+          f"v={v_arr[0]:.0f}->{v_arr[-1]:.1f} "
           f"P1_avg={np.mean(t_p1_hist):.0f}ms P2_avg={np.mean(t_p2_hist):.0f}ms "
           f"total={np.mean(t_p1_hist)+np.mean(t_p2_hist):.0f}ms")
     return d_arr, v_arr

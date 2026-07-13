@@ -1,0 +1,21 @@
+# MGIGO - General-Purpose Black-Box Optimization Solver Framework
+#
+# Install into the MGIGO-local venv:
+#     python3 -m venv .venv
+#     .venv/bin/pip install -r requirements.txt
+#
+# GPU note:
+#   jax[cuda12] pulls the CUDA 12 wheels (matches this machine's GPU).
+#   For a CPU-only install, replace jax[cuda12] with bare `jax`
+#   and run with JAX_PLATFORMS=cpu.
+#
+# Local packages (NOT pip deps - kept in-repo, no install needed):
+#   - gmm_igo.solver_builder     (multi-block M22 GMM-IGO optimizer)
+#   - Constraintdealer.Constran   (σ-nesting constraint engine)
+#   - Cartest.*                   (Frenet B-spline MPC trajectory planner)
+
+jax[cuda12]>=0.8.0
+jaxlib>=0.8.0
+numpy>=1.26
+scipy>=1.11          # only for Cartest/basis/spline.py (offline basis regen)
+matplotlib>=3.8      # only for Cartest/eval/plotting.py (gif/plots)

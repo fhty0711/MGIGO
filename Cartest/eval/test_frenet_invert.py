@@ -597,7 +597,7 @@ def test_circular_reference_geometry():
     x, y, θ, κ = ref.evaluate(jnp.array([0.0]))
     assert_allclose(x, 0.0, atol=1e-6)
     assert_allclose(y, R, atol=1e-6)
-    assert_allclose(κ, 1.0 / R, atol=1e-6)
+    assert_allclose(κ, -1.0 / R, atol=1e-6)   # clockwise ⇒ signed κ = −1/R
 
     # s=πR/2 at right: (R, 0)
     x, y, θ, κ = ref.evaluate(jnp.array([jnp.pi * R / 2]))
@@ -644,9 +644,9 @@ def test_circular_reference_round_trip():
         assert_allclose(s_out, si, atol=1e-6)
         assert_allclose(d_out, di, atol=1e-6)
 
-    # κ_r constant everywhere
+    # κ_r constant everywhere (signed: clockwise ⇒ −1/R)
     _, _, _, κ_all = ref.evaluate(jnp.linspace(0, 100, 50))
-    assert_allclose(κ_all, 1.0 / R * jnp.ones(50), atol=1e-6)
+    assert_allclose(κ_all, -1.0 / R * jnp.ones(50), atol=1e-6)
 
 
 if __name__ == "__main__":

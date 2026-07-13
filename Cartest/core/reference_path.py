@@ -68,8 +68,11 @@ class StraightReference(ReferencePath):
 class CircularReference(ReferencePath):
     """Circular reference path parameterized by arc length.
 
-    s = 0 at the top (cx, cy + R), increasing counter-clockwise.
+    s = 0 at the top (cx, cy + R), increasing clockwise (top → right → bottom → left).
     Positive d = outside the circle (standard Frenet left-normal convention).
+
+    Because the traversal is clockwise the heading decreases with s
+    (θ_r = −s/R), so the *signed* curvature is κ_r = −1/R.
     """
 
     def __init__(self, R: float, cx: float = 0.0, cy: float = 0.0):
@@ -79,12 +82,14 @@ class CircularReference(ReferencePath):
 
     def evaluate(self, s: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         θ = s / self.R
-        # s=0 at top (cx, cy+R), CCW:  x = R·sin(θ), y = R·cos(θ)
+        # s=0 at top (cx, cy+R), CW:  x = R·sin(θ), y = R·cos(θ)
         # Tangent: (cos(θ), −sin(θ)) → heading = atan2(−sin, cos) = −θ (mod 2π)
         x_r = self.cx + self.R * jnp.sin(θ)
         y_r = self.cy + self.R * jnp.cos(θ)
         θ_r = -θ % (2 * jnp.pi)
-        κ_r = jnp.full_like(s, 1.0 / self.R)
+        # Signed curvature = dθ_r/ds = −1/R (clockwise ⇒ heading decreases).
+        # frenet_traj consumes κ_r as signed (jac = 1 − d·κ_r, a_n = κ_r·v_t·ṡ).
+        κ_r = jnp.full_like(s, -1.0 / self.R)
         return x_r, y_r, θ_r, κ_r
 
     def cartesian_to_frenet(self, x: jnp.ndarray, y: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:

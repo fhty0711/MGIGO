@@ -424,10 +424,18 @@ uv run python Energy/UnitCommitment_test.py --mode mpc
 uv run python MPCtest/TSPtest.py
 
 # B-spline trajectory optimization
-uv run python Cartest/Simple.py
+cd MGIGO && .venv/bin/python Cartest/Simple.py empty --steps 150
 ```
 
-### 7.3 Minimal Example — Unconstrained
+> **Cartest 子项目**：MGIGO 自带 `.venv` 虚拟环境
+> （已预装 jax[cuda12]/numpy/scipy/matplotlib），无需 `uv sync`。运行方式：
+> ```bash
+> cd MGIGO
+> .venv/bin/python Cartest/Simple.py empty --steps 150
+> ```
+> 可用场景：`empty` / `single_offset` / `three_blocking` / `circle_track` / `lane_borrow_overtake`
+
+### 7.3 Minimal Example - Unconstrained
 
 ```python
 import jax, jax.numpy as jnp

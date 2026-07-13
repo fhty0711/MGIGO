@@ -692,20 +692,36 @@ Phase 1 的 cost 定义与求解器实现解耦。
 
 ```bash
 # 生成基函数矩阵 (只需一次)
-uv run python Cartest/basis/spline.py
+.venv/bin/python Cartest/basis/spline.py
 
 # MPC demo (首次运行自动 JIT 预热)
-uv run python Cartest/Simple.py --steps 150 --seed 0
-uv run python Cartest/Simple.py --steps 50 --no-plot
+# 场景通过 CLI 参数选择: empty / single_offset / three_blocking / circle_track
+.venv/bin/python Cartest/Simple.py empty --steps 150 --seed 0
+.venv/bin/python Cartest/Simple.py three_blocking --steps 50 --no-plot
+.venv/bin/python Cartest/Simple.py circle_track --steps 150
+# 可用场景: empty / single_offset / three_blocking / circle_track / lane_borrow_overtake
+.venv/bin/python Cartest/Simple.py --help
 
-# 测试 (16个)
-uv run python Cartest/eval/test_frenet_invert.py
+# 冒烟测试 (cost factory 注册表, 7个)
+.venv/bin/python Cartest/eval/test_cost_registry.py
+
+# Frenet 正反变换测试 (18个)
+.venv/bin/python Cartest/eval/test_frenet_invert.py
 
 # 闭环评估
-uv run python Cartest/eval/eval_closed_loop.py --steps 150
+.venv/bin/python Cartest/eval/eval_closed_loop.py three_blocking --steps 150
 ```
 
 输出 `Cartest/frenet_demo.gif`。
+MGIGO 自带 `.venv` 虚拟环境（已预装 jax[cuda12] / numpy / scipy / matplotlib），
+所有命令在 MGIGO 目录下执行即可，无需 `uv sync` 或额外环境变量。
+如需重建 venv：
+
+```bash
+cd MGIGO
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
 
 ## 8. 关键设计决策
 

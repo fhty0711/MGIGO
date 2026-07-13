@@ -23,7 +23,8 @@ from Cartest.planning.warmstart import build_initial_mu
 from Cartest.planning.cost import make_objective, build_context
 from Cartest.planning.constraints import make_constraints
 from Cartest.execution.execute import FrenetState
-from Cartest.planning.scenario import EMPTY as scenario
+from Cartest.planning.scenarios import get_scenario, make_initial_state, build_obstacle_predictions
+from Cartest.planning.costs.default_lyapunov import DEFAULT_CONSTRAINTS
 
 ROOT = Path(__file__).resolve().parents[1] / "Cartest"
 
@@ -43,29 +44,26 @@ from gmm_igo.MPC_Rblockwise import (
 
 def setup_problem():
     """Build the Cartest problem: gen, cost_fn, ctx, mu_init (one fixed step)."""
-    ref_path = StraightReference()
+    scenario = get_scenario("empty")
+    ref_path = scenario["ref_path"]
     gen = FrenetBSplineTrajectory(ROOT / "basis" / "bspline_basis.npz", ref_path)
 
-    obs_list  = scenario["obstacles"]
-    lane_hw   = scenario["lane_hw"]
-    safe_dist = scenario["obs_safe_dist"]
-    v_target  = scenario["v_target"]
-    obs_pos = jnp.array([[o["x"], o["y"]] for o in obs_list], dtype=jnp.float32)
-    obs_rad = jnp.array([o["r"] for o in obs_list], dtype=jnp.float32)
+    road = scenario["road"]
+    safety = scenario["safety"]
+    lane_hw = road["lane_hw"]
+    safe_dist = safety["obs_safe_dist"]
+    v_target = scenario["behavior"]["v_target"]
+    obs_pos, obs_rad = build_obstacle_predictions(scenario, gen)
 
     from Constraintdealer.Constran import build as constran_build
     cost_fn = constran_build(
         make_objective(gen, omega_s=1.0, omega_d=4.0, alpha=0.0),
-        make_constraints(gen, lane_hw, safe_dist),
+        make_constraints(gen, road, safety, DEFAULT_CONSTRAINTS),
         k_inner=1.0, obj_transform='standard',
     )
 
     # One fixed initial state
-    init_spec = scenario["init"]
-    state = FrenetState(
-        s=init_spec["s"], s_dot=init_spec["s_dot"], s_ddot=init_spec["s_ddot"],
-        d=init_spec["d"], d_dot=init_spec["d_dot"], d_ddot=init_spec["d_ddot"],
-    )
+    state = make_initial_state(scenario)
     ctx = build_context(gen, state, v_target, lane_hw, obs_pos, obs_rad)
     mu_init = build_initial_mu(gen, state.s, state.s_dot, state.d)
 
