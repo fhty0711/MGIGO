@@ -565,8 +565,7 @@ gmm_igo/
 │   ├── MPCmain21animate.py               # Obstacle avoidance MPC
 │   ├── TSPtest.py                        # TSP test
 │   ├── mainM1.py / mainM2.py / mainM3.py # Multi-block strategy tests
-│   ├── cma-esversion.py                  # CMA-ES comparison
-│   └── outcmaes/                         # CMA-ES output
+│   └── cma-esversion.py                  # CMA-ES comparison
 │
 ├── Cartest/                              # B-spline trajectory planning
 │   ├── bsplinetraj.py                    # BSpline trajectory generator

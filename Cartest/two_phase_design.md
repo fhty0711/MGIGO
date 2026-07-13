@@ -551,8 +551,8 @@ Frenet → to_vehicle_states → vehicle [T×9] → from_vehicle_states → Fren
 | T 变换 Cost (退化版) | [cost_transform.py:44](planning/cost_transform.py#L44) | ✅ `make_objective_transform` |
 | K 矩阵耦合 Cost (旧) | [cost.py](planning/cost.py) | ✅ α=0 解耦为默认 |
 | Warmstart (Greville + GMM 继承) | [warmstart.py](planning/warmstart.py) | ✅ `tangent_warmstart` + `mpc_warmstart` |
-| 约束构建 (固定嵌套) | [constraints.py](planning/constraints.py) | ✅ `make_constraints(acc_max, jerk_max)` |
-| 场景配置 | [scenario.py](planning/scenario.py) | ✅ SINGLE_OFFSET, THREE_BLOCKING, EMPTY |
+| 约束构建 (固定嵌套) | [constraints.py](planning/constraints.py) | ✅ `make_constraints(gen, road, safety, config)` |
+| 场景配置 | [scenarios/](planning/scenarios) | ✅ 注册表: empty, single_offset, three_blocking, circle_track, lane_borrow_overtake, curved_cruise |
 | 单阶段 Demo | [Simple.py](Simple.py) | ✅ 单 solver, 单 cost |
 | Frenet 正反变换测试 (16 个) | [test_frenet_invert.py](eval/test_frenet_invert.py) | ✅ |
 
@@ -873,7 +873,7 @@ T = [[1,  α],
 | [planning/constraints.py](planning/constraints.py) | 约束构建 (obs/lane/speed/acc/jerk) |
 | [planning/solver_modes.py](planning/solver_modes.py) | 5 个预编译 solver 模式 |
 | [planning/warmstart.py](planning/warmstart.py) | Greville warmstart + GMM 继承 |
-| [planning/scenario.py](planning/scenario.py) | 场景配置 |
+| [planning/scenarios/](planning/scenarios) | 场景注册表 |
 | [execution/execute.py](execution/execute.py) | FrenetState, execute_perfect_tracking |
 | [eval/test_frenet_invert.py](eval/test_frenet_invert.py) | 正反变换 16 个测试 |
 | [Simple.py](Simple.py) | 单阶段 MPC demo |

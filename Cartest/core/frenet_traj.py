@@ -146,7 +146,10 @@ class FrenetBSplineTrajectory:
         """
         # Reference path geometry at s(t)
         _, _, θ_r, κ_r = self.ref_path.evaluate(s)
-        # κ_r' = dκ_r/ds — 0 for lines and circular arcs; ignored for now
+        # dκ_r/ds is 0 for straight lines and circular arcs, but nonzero on
+        # clothoids (PiecewiseCurvatureReference). The dκ_r/ds correction terms
+        # are omitted here (constant-κ approximation); valid when curvature
+        # varies slowly over the horizon.
 
         # ── Velocity ────────────────────────────────────────────
         # v = (1-d·κ_r)·ḃ·t + ḋ·n   in (t, n) basis
@@ -165,7 +168,7 @@ class FrenetBSplineTrajectory:
         # ── Acceleration (reference-path tangential / normal) ──
         # a_t = dv_t/dt - v_n·κ_r·ḃ
         # a_n = d̈ + κ_r·v_t·ḃ    (centrifugal)
-        vt_dot = (1.0 - d * κ_r) * s_ddot - κ_r * s_dot * d_dot   # κ_r' term omitted
+        vt_dot = (1.0 - d * κ_r) * s_ddot - κ_r * s_dot * d_dot   # dκ_r/ds term omitted (slowly-varying κ)
         a_t = vt_dot - vn * κ_r * s_dot
         a_n = d_ddot + κ_r * vt * s_dot
 

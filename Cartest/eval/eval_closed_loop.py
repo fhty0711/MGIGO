@@ -197,5 +197,3 @@ if __name__ == "__main__":
     metrics, hx, hy, hv = run_eval(steps=args.steps, seed=args.seed,
                                    window=args.window, scenario_name=args.scenario)
     print_summary(metrics)
-        ctx = build_context(gen, state, v_target, lane_hw, obs_pos, obs_rad,
-                            lane_bounds_d=lane_bounds_d)

@@ -10,6 +10,7 @@ from Cartest.planning.scenarios.single_offset import SCENARIO as SINGLE_OFFSET
 from Cartest.planning.scenarios.three_blocking import SCENARIO as THREE_BLOCKING
 from Cartest.planning.scenarios.circle_track import SCENARIO as CIRCLE_TRACK
 from Cartest.planning.scenarios.lane_borrow_overtake import SCENARIO as LANE_BORROW_OVERTAKE
+from Cartest.planning.scenarios.curved_cruise import SCENARIO as CURVED_CRUISE
 
 
 SCENARIOS = {
@@ -18,6 +19,7 @@ SCENARIOS = {
     "three_blocking": THREE_BLOCKING,
     "circle_track": CIRCLE_TRACK,
     "lane_borrow_overtake": LANE_BORROW_OVERTAKE,
+    "curved_cruise": CURVED_CRUISE,
 }
 
 
@@ -144,6 +146,8 @@ def first_frame_obstacles(obs_pos, obs_rad):
 __all__ = [
     "EMPTY", "SINGLE_OFFSET", "THREE_BLOCKING", "CIRCLE_TRACK",
     "LANE_BORROW_OVERTAKE",
+    "CURVED_CRUISE",
     "SCENARIOS", "get_scenario", "make_initial_state",
     "build_obstacle_predictions", "build_obstacles", "first_frame_obstacles",
 ]
+from Cartest.planning.scenarios.curved_cruise import SCENARIO as CURVED_CRUISE
