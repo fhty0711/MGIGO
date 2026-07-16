@@ -242,3 +242,36 @@ def batched_nested_costs_from_plans(plans, scenario, k_inner=1.0, obj_transform=
         inner = M * sigma_k(inner, k=1.0)                             # final sigma wrap
         result.append(inner)
     return jnp.stack(result, axis=-1)
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Fixed-sample expected cost (f_hat) for one agent
+# ───────────────────────────────────────────────────────────────────────
+
+def batched_expected_cost_for_agent(gen, samples_b, samples_m, ctx, scenario, agent_idx):
+    """Compute f_hat[B] for one agent from fixed block samples.
+
+    samples_b: [N_blocks, B, D]       candidate (own-action) samples
+    samples_m: [N_blocks, M_inner, D] background (opponent) samples
+
+    For each candidate b, the agent's own blocks are taken from samples_b[b]
+    and all other blocks from background samples_m[m]; the expected cost is
+    averaged over m.  This mirrors the joint construction in
+    ``MPC_G_MS._step_fn_rne_blocks.evaluate_agent_expected_cost``.
+    """
+    block_to_agent = jnp.asarray(scenario["game"]["block_to_agent"])
+    block_mask = block_to_agent == agent_idx
+    B = samples_b.shape[1]
+    M_inner = samples_m.shape[1]
+
+    def joint_for_bm(b_idx, m_idx):
+        joint_blocks = jnp.where(block_mask[:, None], samples_b[:, b_idx, :], samples_m[:, m_idx, :])
+        return joint_blocks.reshape(-1)
+
+    joints = vmap(
+        lambda b: vmap(lambda m: joint_for_bm(b, m))(jnp.arange(M_inner))
+    )(jnp.arange(B))
+    flat_joints = joints.reshape((B * M_inner, -1))
+    plans = evaluate_joint_plan_batch(gen, flat_joints, ctx, agent_count=3)
+    costs = batched_nested_costs_from_plans(plans, scenario)
+    return costs[:, agent_idx].reshape((B, M_inner)).mean(axis=1)
