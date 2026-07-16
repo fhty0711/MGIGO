@@ -116,6 +116,14 @@ def test_three_agent_track_executes_third_plan_sample():
     assert scenario["game"]["execute_index"] == 3
 
 
+def test_three_agent_track_uses_validated_realtime_iteration_budget():
+    from Cartest.planning.scenarios import get_scenario
+
+    scenario = get_scenario("three_agent_track")
+
+    assert scenario["game"]["T"] == 100
+
+
 def test_three_agent_track_initial_spacing_is_safe():
     from Cartest.planning.scenarios import get_scenario
 
@@ -135,5 +143,6 @@ if __name__ == "__main__":
     test_simple_runner_uses_scenario_default_steps()
     test_simple_runner_builds_timestamped_output_video_path()
     test_three_agent_track_executes_third_plan_sample()
+    test_three_agent_track_uses_validated_realtime_iteration_budget()
     test_three_agent_track_initial_spacing_is_safe()
     print("unified runner scenario tests ok")
