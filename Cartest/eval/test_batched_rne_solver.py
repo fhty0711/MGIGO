@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 from pathlib import Path
 import sys
 
@@ -17,6 +18,7 @@ from Cartest.core.frenet_traj import FrenetBSplineTrajectory
 from Cartest.execution.execute import FrenetState
 from Cartest.planning.scenarios import get_scenario
 from Cartest.planning.solver_modes import build_multi_agent_context, build_multi_agent_warmstart
+from Cartest.planning.solver_modes import build_cartest_nash_solver
 from Cartest.planning.costs.three_agent_track import make_agent_specs
 from Constraintdealer.Constran import build_multi_agent
 
@@ -47,7 +49,7 @@ def _make_samples(gen, scenario):
 
 
 def test_batched_f_hat_matches_black_box_scalar_loop():
-    from Cartest.planning.batched_game_eval import batched_expected_cost_for_agent
+    from Cartest.planning.batched_game_eval import batched_expected_costs_for_all_agents
 
     scenario = copy.deepcopy(get_scenario("three_agent_track"))
     gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
@@ -57,6 +59,7 @@ def test_batched_f_hat_matches_black_box_scalar_loop():
     specs = make_agent_specs(gen, scenario)
     scalar_fns = build_multi_agent(specs, k_inner=1.0, obj_transform="standard")
 
+    expected_by_agent = []
     for aid in range(3):
         block_mask = jnp.asarray(scenario["game"]["block_to_agent"]) == aid
         expected = []
@@ -66,14 +69,15 @@ def test_batched_f_hat_matches_black_box_scalar_loop():
                 joint = jnp.where(block_mask[:, None], samples_b[:, b, :], samples_m[:, m, :]).reshape(-1)
                 vals.append(scalar_fns[aid](aid, joint, ctx))
             expected.append(jnp.mean(jnp.stack(vals)))
-        expected = jnp.stack(expected)
+        expected_by_agent.append(jnp.stack(expected))
 
-        actual = batched_expected_cost_for_agent(gen, samples_b, samples_m, ctx, scenario, aid)
-        assert actual.shape == expected.shape
-        assert jnp.allclose(actual, expected, rtol=2e-4, atol=2e-3)
+    expected = jnp.stack(expected_by_agent)
+    actual = batched_expected_costs_for_all_agents(gen, samples_b, samples_m, ctx, scenario)
+    assert actual.shape == expected.shape
+    assert jnp.allclose(actual, expected, rtol=2e-4, atol=2e-3)
 
 
-def test_batched_f_hat_uses_b_plus_m_trajectory_evaluations(monkeypatch=None):
+def test_batched_f_hat_uses_shared_b_plus_m_trajectory_evaluations(monkeypatch=None):
     from Cartest.planning import batched_game_eval
 
     scenario = copy.deepcopy(get_scenario("three_agent_track"))
@@ -90,16 +94,16 @@ def test_batched_f_hat_uses_b_plus_m_trajectory_evaluations(monkeypatch=None):
 
     batched_game_eval.evaluate_agent_control_batch = counted
     try:
-        _ = batched_game_eval.batched_expected_cost_for_agent(gen, samples_b, samples_m, ctx, scenario, 0)
+        _ = batched_game_eval.batched_expected_costs_for_all_agents(gen, samples_b, samples_m, ctx, scenario)
     finally:
         batched_game_eval.evaluate_agent_control_batch = original
 
-    # Agent 0 needs: ego B candidates + front M backgrounds + rear M backgrounds.
-    assert counts["calls"] == 3
+    # All three agents share 3 candidate batches + 3 background batches.
+    assert counts["calls"] == 6
 
 
 def test_cartest_batched_rne_solver_runs_small_problem():
-    from Cartest.planning.batched_rne_solver import cartest_batched_rne_blocks_solver
+    from Cartest.planning.batched_rne_solver import make_cartest_batched_rne_blocks_solver
 
     scenario = copy.deepcopy(get_scenario("three_agent_track"))
     scenario["game"] = dict(scenario["game"], T=2, B=4, B0=2, M_inner=3, K=2)
@@ -110,10 +114,8 @@ def test_cartest_batched_rne_solver_runs_small_problem():
     mu = mu[:, :2]
     L_inv = L_inv[:, :2]
 
-    result = cartest_batched_rne_blocks_solver(
-        jax.random.PRNGKey(6), gen, scenario, context=ctx,
-        initial_mu=mu, initial_L_inv=L_inv,
-    )
+    solver = make_cartest_batched_rne_blocks_solver(gen, scenario)
+    result = solver(jax.random.PRNGKey(6), context=ctx, initial_mu=mu, initial_L_inv=L_inv)
 
     assert result["mu"].shape == mu.shape
     assert result["L_inv"].shape == L_inv.shape
@@ -121,27 +123,51 @@ def test_cartest_batched_rne_solver_runs_small_problem():
     assert jnp.all(jnp.isfinite(result["mu"]))
 
 
-def test_batched_costs_for_all_agents_matches_per_agent():
-    from Cartest.planning.batched_game_eval import (
-        batched_expected_cost_for_agent, batched_expected_costs_for_all_agents)
+def test_fast_sampling_avoids_per_sample_covariance_inverse():
+    from Cartest.planning import batched_rne_solver
 
+    source = inspect.getsource(batched_rne_solver._sample_all_blocks_fast)
+    assert "jnp.linalg.inv" not in source
+    assert "multivariate_normal" not in source
+
+
+def test_batched_rne_exposes_reusable_solver_factory():
+    from Cartest.planning import batched_rne_solver
+
+    assert hasattr(batched_rne_solver, "make_cartest_batched_rne_blocks_solver")
+    assert not hasattr(batched_rne_solver, "cartest_batched_rne_blocks_solver")
+
+
+def test_cartest_batched_solver_matches_generic_rne_blocks_small_problem():
     scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    scenario["game"] = dict(scenario["game"], T=2, B=4, B0=2, M_inner=2, K=2)
     gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
-    ctx = build_multi_agent_context(_states(scenario))
-    samples_b, samples_m = _make_samples(gen, scenario)
+    states = _states(scenario)
+    ctx = build_multi_agent_context(states)
+    mu, L_inv = build_multi_agent_warmstart(gen, scenario, states, jax.random.PRNGKey(7))
+    mu = mu[:, :2]
+    L_inv = L_inv[:, :2]
 
-    per_agent = jnp.stack([
-        batched_expected_cost_for_agent(gen, samples_b, samples_m, ctx, scenario, aid)
-        for aid in range(3)
-    ])  # [3, B]
-    all_agents = batched_expected_costs_for_all_agents(gen, samples_b, samples_m, ctx, scenario)
-    assert all_agents.shape == per_agent.shape
-    assert jnp.allclose(all_agents, per_agent, rtol=2e-4, atol=2e-3)
+    generic_scenario = copy.deepcopy(scenario)
+    generic_scenario["game"] = dict(scenario["game"], solver="rne_blocks")
+    batched_scenario = copy.deepcopy(scenario)
+    batched_scenario["game"] = dict(scenario["game"], solver="cartest_batched_rne_blocks")
+
+    generic = build_cartest_nash_solver(gen, generic_scenario)(
+        jax.random.PRNGKey(8), context=ctx, initial_mu=mu, initial_S_or_L=L_inv)
+    batched = build_cartest_nash_solver(gen, batched_scenario)(
+        jax.random.PRNGKey(8), context=ctx, initial_mu=mu, initial_S_or_L=L_inv)
+
+    assert jnp.allclose(batched.diag["mu"], generic.diag["mu"], rtol=2e-4, atol=2e-3)
+    assert jnp.allclose(batched.diag["pi"], generic.diag["pi"], rtol=2e-4, atol=2e-3)
+    assert jnp.allclose(batched.per_agent_cost, generic.per_agent_cost, rtol=2e-4, atol=2e-3)
 
 
 if __name__ == "__main__":
     test_batched_f_hat_matches_black_box_scalar_loop()
-    test_batched_f_hat_uses_b_plus_m_trajectory_evaluations()
-    test_batched_costs_for_all_agents_matches_per_agent()
+    test_batched_f_hat_uses_shared_b_plus_m_trajectory_evaluations()
     test_cartest_batched_rne_solver_runs_small_problem()
+    test_fast_sampling_avoids_per_sample_covariance_inverse()
+    test_batched_rne_exposes_reusable_solver_factory()
+    test_cartest_batched_solver_matches_generic_rne_blocks_small_problem()
     print("batched rne helper tests ok")

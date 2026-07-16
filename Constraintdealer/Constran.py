@@ -375,6 +375,7 @@ def _assemble_nest(objective_fn: Callable,
                    k_inner: float = 0.1,
                    penalize_only_soft: bool = False,  # deprecated
                    obj_T_fn: Callable = None,
+                   prepare_fn: Optional[Callable] = None,
                    ) -> Callable:
     """Self-similar sigma nesting.  k_inner only for objective; constraints use σ_1.
     Φ = baseline + max(0,T(g)) + δ·σ_1(β·max(0,T(g)))  for tunable.
@@ -389,13 +390,14 @@ def _assemble_nest(objective_fn: Callable,
     n_total = n_constraints + 1  # n constraints + obj's own σ wrap
 
     def cost_fn(x, ctx):
-        inner = obj_T_fn(objective_fn(x, ctx))
+        eval_ctx = (ctx, prepare_fn(x, ctx)) if prepare_fn is not None else ctx
+        inner = obj_T_fn(objective_fn(x, eval_ctx))
         inner = inner / (M ** n_total)                # pre-scale = 最内部 √2 的 n_total 次方
         inner = sigma_k(inner, k=k_inner)              # k only for objective
 
         for _priority, mode, params, viol_fn, T_fn in layers:
             baseline = params.get('baseline', 0.0)
-            g_raw = viol_fn(x, ctx)
+            g_raw = viol_fn(x, eval_ctx)
             t_val = jnp.maximum(0.0, T_fn(g_raw))      # 精确罚: 只罚违规
 
             # Φ = exact penalty + baseline (when violated)
@@ -423,6 +425,7 @@ def build(objective_fn: Callable[[jnp.ndarray, Any], jnp.ndarray],
           validate: bool = True,
           jit_cost: bool = True,
           obj_transform: str = 'standard',
+          prepare_fn: Optional[Callable[[jnp.ndarray, Any], Any]] = None,
           ) -> Callable[[jnp.ndarray, Any], jnp.ndarray]:
     """Build a solver-ready cost function from objective and constraints.
 
@@ -445,6 +448,8 @@ def build(objective_fn: Callable[[jnp.ndarray, Any], jnp.ndarray],
     """
     if constraints is None:
         constraints = []
+    if prepare_fn is None:
+        prepare_fn = getattr(objective_fn, '_constran_prepare', None)
 
     if validate:
         _validate_constraints(constraints)
@@ -477,7 +482,8 @@ def build(objective_fn: Callable[[jnp.ndarray, Any], jnp.ndarray],
     cost_fn = _assemble_nest(objective_fn, layers,
                              k_inner=k_inner,
                              penalize_only_soft=penalize_only_soft,
-                             obj_T_fn=obj_T_fn)
+                             obj_T_fn=obj_T_fn,
+                             prepare_fn=prepare_fn)
 
     if jit_cost:
         return jax.jit(cost_fn)
@@ -505,11 +511,13 @@ def build_multi_agent(
     """
     result = {}
     for agent_id, (obj_fn, constraints) in agent_specs.items():
+        prepare_fn = getattr(obj_fn, '_constran_prepare', None)
         base_fn = build(obj_fn, constraints,
                         k_inner=k_inner,
                         penalize_only_soft=penalize_only_soft,
                         validate=validate,
                         obj_transform=obj_transform,
+                        prepare_fn=prepare_fn,
                         jit_cost=False)
 
         def _wrap(base, aid):

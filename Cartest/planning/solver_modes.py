@@ -351,13 +351,13 @@ def build_cartest_nash_solver(gen, scenario):
 def _build_cartest_batched_solver(gen, scenario, dims):
     """Build a solver callable for the Cartest batched RNE blocks mode.
 
-    This wraps ``cartest_batched_rne_blocks_solver`` (which evaluates B-spline
+    This wraps ``make_cartest_batched_rne_blocks_solver`` (which evaluates B-spline
     trajectories outside the ``B x M_inner`` pairing loop) and packs its raw
     diagnostics into the same ``NashResult`` shape the generic
     ``rne_blocks`` path returns, so ``select_nash_plan`` and the closed-loop
     runner work unchanged.
     """
-    from Cartest.planning.batched_rne_solver import cartest_batched_rne_blocks_solver
+    from Cartest.planning.batched_rne_solver import make_cartest_batched_rne_blocks_solver
     from Cartest.planning.batched_game_eval import (
         evaluate_joint_plan_batch, batched_nested_costs_from_plans,
     )
@@ -370,6 +370,8 @@ def _build_cartest_batched_solver(gen, scenario, dims):
     # (faster) drop-in for rne_blocks on three_agent_track.
     k_inner = 0.1
     obj_transform = "standard"
+    batched_solver = make_cartest_batched_rne_blocks_solver(
+        gen, scenario, k_inner=k_inner, obj_transform=obj_transform)
 
     def _solve(key, *, context=None, initial_mu=None, initial_S_or_L=None,
                initial_pi=None, warm_start=None):
@@ -389,10 +391,9 @@ def _build_cartest_batched_solver(gen, scenario, dims):
                 "cartest_batched_rne_blocks requires initial_mu and initial_S_or_L"
             )
 
-        raw = cartest_batched_rne_blocks_solver(
-            key, gen, scenario, context=context,
+        raw = batched_solver(
+            key, context=context,
             initial_mu=mu, initial_L_inv=L_inv, initial_v=v,
-            k_inner=k_inner, obj_transform=obj_transform,
         )
 
         final_mu = raw["mu"]

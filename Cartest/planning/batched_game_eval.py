@@ -250,6 +250,34 @@ def _nest_one_agent(obj, violations, k_inner=1.0, obj_transform="standard"):
     return inner
 
 
+def _nest_one_agent_from_aggregates(obj, aggregate_values, k_inner=1.0,
+                                    obj_transform="standard"):
+    """Sigma-nested cost from already-aggregated constraint values.
+
+    ``obj`` and non-collision aggregates are typically shaped ``[B, 1]``;
+    collision is shaped ``[B, M_inner]``.  JAX broadcasting then evaluates the
+    same nested scalar cost for every candidate/background pair without first
+    materializing full broadcast trajectory dictionaries.
+    """
+    M = jnp.sqrt(2.0)
+    obj_knots_g, obj_knots_T = _obj_table(obj_transform)
+    n_total = len(_THREE_AGENT_LAYERS) + 1
+
+    inner = T_alpha(obj, obj_knots_g, obj_knots_T)
+    inner = inner / (M ** n_total)
+    inner = sigma_k(inner, k=k_inner)
+
+    for name, _agg, table, baseline, resolution in _THREE_AGENT_LAYERS:
+        g_raw = aggregate_values[name]
+        t_val = jnp.maximum(0.0, T_alpha(g_raw, table[0], table[1]))
+        Phi = t_val
+        violated = jnp.maximum(0.0, g_raw) > resolution
+        Phi = jnp.where(violated, Phi + baseline, Phi)
+        inner = M * sigma_k(inner, k=1.0) + Phi
+
+    return M * sigma_k(inner, k=1.0)
+
+
 def batched_nested_costs_from_plans(plans, scenario, k_inner=1.0, obj_transform="standard"):
     """Three-agent sigma-nested cost shaped [batch, 3].
 
@@ -267,6 +295,94 @@ def batched_nested_costs_from_plans(plans, scenario, k_inner=1.0, obj_transform=
             k_inner, obj_transform)
         for aid in range(3)
     ], axis=-1)
+
+
+def _own_constraint_aggregates(plan, scenario):
+    """Aggregate non-interaction constraints for one candidate plan batch."""
+    v_min = float(scenario["safety"].get("v_min", 2.0))
+    v_max = float(scenario["safety"].get("v_max", 35.0))
+    acc_max = float(scenario["safety"].get("acc_max", 5.0))
+    jerk_max = float(scenario["safety"].get("jerk_max", 2.0))
+    lane_min, lane_max = scenario["road"].get("lane_bounds_d", (-1.75, 5.25))
+
+    vehicle = plan["vehicle"]
+    lane = jnp.maximum(jnp.maximum(0.0, lane_min - plan["d"]),
+                       jnp.maximum(0.0, plan["d"] - lane_max))
+    v = vehicle[..., 2]
+    speed = jnp.maximum(jnp.maximum(0.0, v_min - v), jnp.maximum(0.0, v - v_max))
+    a_long, a_lat = vehicle[..., 4], vehicle[..., 5]
+    a_mag = jnp.sqrt(a_long ** 2 + a_lat ** 2)
+    acc = jnp.maximum(
+        jnp.maximum(0.0, jnp.abs(a_long) - acc_max),
+        jnp.maximum(jnp.maximum(0.0, jnp.abs(a_lat) - acc_max), jnp.maximum(0.0, a_mag - acc_max)),
+    )
+    j_long, j_lat = vehicle[..., 6], vehicle[..., 7]
+    j_mag = jnp.sqrt(j_long ** 2 + j_lat ** 2)
+    jerk = jnp.maximum(
+        jnp.maximum(0.0, jnp.abs(j_long) - jerk_max),
+        jnp.maximum(jnp.maximum(0.0, jnp.abs(j_lat) - jerk_max), jnp.maximum(0.0, j_mag - jerk_max)),
+    )
+    return {
+        "lane": _aggregate(lane, "q95"),
+        "speed": _aggregate(speed, "max"),
+        "acc": _aggregate(acc, "max"),
+        "jerk": _aggregate(jerk, "max"),
+    }
+
+
+def _pair_distance_violation_bm(candidate, background):
+    """Pairwise distance violation for candidate [B,T] and background [M,T]."""
+    safe_gap = candidate["safe_gap"]
+    dx = candidate["x"][:, None, :] - background["x"][None, :, :]
+    dy = candidate["y"][:, None, :] - background["y"][None, :, :]
+    dist = jnp.sqrt(dx ** 2 + dy ** 2 + 1e-6)
+    return jnp.maximum(0.0, safe_gap - dist)
+
+
+def _collision_aggregate_bm(candidate, backgrounds, scenario, aid):
+    """Collision aggregate shaped [B, M_inner] for one acting agent."""
+    safe_gap = float(scenario["safety"].get("safe_gap", 3.0))
+    vehicle_length = float(scenario["safety"].get("vehicle_length", 5.0))
+    own = dict(candidate[aid], safe_gap=safe_gap)
+
+    if aid == 0:
+        front = backgrounds[1]
+        rear = backgrounds[2]
+        ego_front = _pair_distance_violation_bm(own, front)
+        ego_rear = _pair_distance_violation_bm(own, rear)
+        return jnp.max(jnp.maximum(ego_front, ego_rear), axis=-1)
+
+    if aid == 1:
+        ego = backgrounds[0]
+        rear = backgrounds[2]
+        front_ego = _pair_distance_violation_bm(own, ego)[..., :2]
+        front_rear = _pair_distance_violation_bm(own, rear)[..., :2]
+        return jnp.max(jnp.maximum(front_ego, front_rear), axis=-1)
+
+    ego = backgrounds[0]
+    front = backgrounds[1]
+    rear_ego_short = _pair_distance_violation_bm(own, ego)[..., :2]
+    rear_ego = jnp.max(rear_ego_short, axis=-1)
+    clearance = vehicle_length + safe_gap
+    clearance_violation = jnp.maximum(
+        0.0, clearance - (front["s"][None, :, :] - own["s"][:, None, :])
+    )
+    rear_front = jnp.max(clearance_violation, axis=-1)
+    return jnp.maximum(rear_ego, rear_front)
+
+
+def _fast_expected_cost_for_agent(candidate, background, scenario, aid,
+                                  k_inner=1.0, obj_transform="standard"):
+    """Expected cost [B] for one acting agent without full-plan broadcasting."""
+    B = candidate[aid]["s"].shape[0]
+    M_inner = background[aid]["s"].shape[0]
+    own = candidate[aid]
+    obj = _objective_for_agent(own, scenario, aid)[:, None]  # [B, 1]
+    own_aggs = {k: v[:, None] for k, v in _own_constraint_aggregates(own, scenario).items()}
+    own_aggs["collision"] = _collision_aggregate_bm(candidate, background, scenario, aid)
+    pair_cost = _nest_one_agent_from_aggregates(
+        obj, own_aggs, k_inner=k_inner, obj_transform=obj_transform)
+    return pair_cost.reshape((B, M_inner)).mean(axis=1)
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -304,55 +420,6 @@ def _plans_for_agent_source(gen, source, ctx, agent_idx):
     return evaluate_agent_control_batch(gen, source[s_block], source[d_block], ctx, agent_idx)
 
 
-def _broadcast_plan(plan, B, M_inner, use_candidate):
-    """Tile a [N, ...] plan into [B * M_inner, ...] for pairwise pairing.
-
-    Candidate plans (N=B) are repeated across the M_inner axis; background
-    plans (N=M_inner) are repeated across the B axis.  Row ``b * M_inner + m``
-    then carries candidate ``b`` (for the acting agent) and background ``m``
-    (for the opponents), matching the joint construction in MPC_G_MS.
-    """
-    if use_candidate:
-        return {key: jnp.repeat(value[:, None, ...], M_inner, axis=1)
-                       .reshape((B * M_inner,) + value.shape[1:])
-                for key, value in plan.items()}
-    return {key: jnp.repeat(value[None, :, ...], B, axis=0)
-                   .reshape((B * M_inner,) + value.shape[1:])
-            for key, value in plan.items()}
-
-
-def batched_expected_cost_for_agent(gen, samples_b, samples_m, ctx, scenario, agent_idx,
-                                    k_inner=1.0, obj_transform="standard"):
-    """Compute f_hat[B] for one agent from fixed block samples.
-
-    samples_b: [N_blocks, B, D]       candidate (own-action) samples
-    samples_m: [N_blocks, M_inner, D] background (opponent) samples
-
-    Trajectories are evaluated only ``B + 2 * M_inner`` times (the acting
-    agent's B candidates plus each opponent's M_inner backgrounds) and then
-    broadcast over the B x M_inner pairing - instead of evaluating all
-    ``B * M_inner`` joint trajectories.  The pairwise game cost is computed
-    by broadcasting the cached ego/front/rear plans.
-    """
-    B = samples_b.shape[1]
-    M_inner = samples_m.shape[1]
-
-    # Only the plans actually needed: the agent's own candidates (from
-    # samples_b) and the other agents' backgrounds (from samples_m).
-    plans = [None, None, None]
-    plans[agent_idx] = _plans_for_agent_source(gen, samples_b, ctx, agent_idx)
-    for aid in range(3):
-        if aid != agent_idx:
-            plans[aid] = _plans_for_agent_source(gen, samples_m, ctx, aid)
-
-    broadcast = tuple(
-        _broadcast_plan(plans[aid], B, M_inner, aid == agent_idx) for aid in range(3)
-    )
-    costs = batched_nested_costs_from_plans(broadcast, scenario, k_inner=k_inner,
-                                            obj_transform=obj_transform)
-    return costs[:, agent_idx].reshape((B, M_inner)).mean(axis=1)
-
-
 def batched_expected_costs_for_all_agents(gen, samples_b, samples_m, ctx, scenario,
                                           k_inner=1.0, obj_transform="standard"):
     """Compute f_hat [M_agent, B] for all agents with a shared plan cache.
@@ -361,26 +428,14 @@ def batched_expected_costs_for_all_agents(gen, samples_b, samples_m, ctx, scenar
     are evaluated once per agent - 6 trajectory-eval calls total - and reused
     across all three agents' expected-cost evaluations.  For each agent only
     its own nested cost is computed (not all three), so this is the
-    solver-facing fast path; ``batched_expected_cost_for_agent`` remains the
-    single-agent reference used by the equivalence tests.
+    solver-facing path avoids the old full-plan broadcast used during
+    development and evaluates only aggregate values needed by each agent's
+    nested cost.
     """
-    B = samples_b.shape[1]
-    M_inner = samples_m.shape[1]
     candidate = [_plans_for_agent_source(gen, samples_b, ctx, aid) for aid in range(3)]
     background = [_plans_for_agent_source(gen, samples_m, ctx, aid) for aid in range(3)]
-
-    f_hats = []
-    for aid in range(3):
-        plans = [None, None, None]
-        plans[aid] = candidate[aid]
-        for other in range(3):
-            if other != aid:
-                plans[other] = background[other]
-        broadcast = tuple(
-            _broadcast_plan(plans[a], B, M_inner, a == aid) for a in range(3)
-        )
-        obj = _objective_for_agent(broadcast[aid], scenario, aid)
-        viol = _violations_for_agent(broadcast, scenario, aid)
-        cost = _nest_one_agent(obj, viol, k_inner, obj_transform)      # [B * M_inner]
-        f_hats.append(cost.reshape((B, M_inner)).mean(axis=1))         # [B]
-    return jnp.stack(f_hats)                                           # [3, B]
+    return jnp.stack([
+        _fast_expected_cost_for_agent(candidate, background, scenario, aid,
+                                      k_inner=k_inner, obj_transform=obj_transform)
+        for aid in range(3)
+    ])

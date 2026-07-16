@@ -696,6 +696,7 @@ def build_nash_solver(
             fitness_fns = None
 
         # Call solver
+        _metrics = None
         if solver == "rne":
             final_mu, final_L, final_pi = _impl(
                 key=key, T=T, dt=dt, M_agent=M_agent, K=K,
@@ -716,7 +717,7 @@ def build_nash_solver(
                 block_to_agent_idx=block_to_agent_arr,
                 initial_v_k=v_k,
             )
-            final_v = v_k  # for warm_start tracking
+            final_v = jnp.log(final_pi[..., :-1] / (final_pi[..., -1:] + 1e-10))
         else:  # rne_single / rne_single_verbose
             result = _impl(
                 key=key, T=T, dt=dt, M_agent=M_agent, K=K,
@@ -773,6 +774,15 @@ def build_nash_solver(
             joint_x=joint_x,
             per_agent_cost=per_agent_cost,
             solver_name=solver,
+            diag={
+                "mu": final_mu,
+                "S_or_L": final_L,
+                "pi": final_pi,
+                "v": final_v,
+                "block_to_agent": tuple(block_to_agent),
+                "dims": tuple(dims),
+                "metrics": _metrics,
+            },
         )
 
     return _solve

@@ -18,6 +18,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 from jax import random, lax, vmap
+from jax.scipy.linalg import solve_triangular
 
 from gmm_igo.MPC_G_MS import _update_block_component_core
 from Cartest.planning.batched_game_eval import batched_expected_costs_for_all_agents
@@ -34,7 +35,9 @@ def _sample_all_blocks(mu, S, pi_all, count, key):
     """Sample ``count`` points per block from the block GMMs.
 
     ``S`` is the precision (information) matrix, so the per-component
-    covariance is ``inv(S + eps*I)`` - matching ``MPC_G_MS``.
+    covariance is ``inv(S + eps*I)``.  This deliberately matches the sampling
+    and PRNG-key consumption in ``MPC_G_MS`` so the Cartest batched solver is
+    comparable to generic ``rne_blocks`` under the same key and warm start.
     """
     N_blocks = mu.shape[0]
     K = mu.shape[1]
@@ -51,30 +54,35 @@ def _sample_all_blocks(mu, S, pi_all, count, key):
     return vmap(sample_single_block)(jnp.arange(N_blocks), random.split(key, N_blocks))
 
 
-def cartest_batched_rne_blocks_solver(
-    key,
+def _sample_all_blocks_fast(mu, S, pi_all, count, key):
+    """Faster precision sampler with different PRNG stream than ``MPC_G_MS``."""
+    N_blocks = mu.shape[0]
+    K = mu.shape[1]
+
+    def sample_single_block(b_idx, b_key):
+        key_choice, key_noise = random.split(b_key)
+        comps = random.choice(key_choice, K, p=pi_all[b_idx], shape=(count,))
+        z = random.normal(key_noise, shape=(count, S.shape[-1]))
+        L = jnp.linalg.cholesky(S[b_idx] + jnp.eye(S.shape[-1]) * 1e-7)
+        eps_all = vmap(lambda L_k: solve_triangular(L_k, z.T, lower=True, trans="T").T)(L)
+        return mu[b_idx, comps] + eps_all[comps, jnp.arange(count)]
+
+    return vmap(sample_single_block)(jnp.arange(N_blocks), random.split(key, N_blocks))
+
+
+def make_cartest_batched_rne_blocks_solver(
     gen,
     scenario,
     *,
-    context,
-    initial_mu,
-    initial_L_inv,
-    initial_v=None,
     k_inner=0.1,
     obj_transform="standard",
 ):
-    """Run Cartest-specific batched RNE blocks and return dict diagnostics.
+    """Build a reusable Cartest-specific batched RNE blocks callable.
 
-    ``k_inner`` / ``obj_transform`` default to the same values the generic
-    ``build_nash_solver`` path uses (0.1 / "standard") so the batched path is
-    a faithful drop-in for ``rne_blocks`` on ``three_agent_track``.
-
-    Returns keys:
-      mu:       [N_blocks, K, D]
-      L_inv:    [N_blocks, K, D, D]   (Cholesky factor of the precision matrix)
-      pi:       [N_blocks, K]
-      v:        [N_blocks, K - 1]
-      metrics:  dict with mean_fitness history
+    The JIT-compiled scan core is created once here and reused across MPC
+    steps.  Creating the ``@jax.jit`` function inside every solve call forces
+    JAX to compile a fresh callable each step, which dominates runtime for the
+    fixed-size three-agent problem.
     """
     game = scenario["game"]
     T = int(game.get("T", 300))
@@ -92,9 +100,7 @@ def cartest_batched_rne_blocks_solver(
     dims = tuple([n_free] * N_blocks)
     dims_arr = jnp.array(dims)
 
-    ctx = {k: jnp.asarray(v) for k, v in context.items()}
     v_reset = jnp.zeros((N_blocks, K - 1))
-    v_init = jnp.zeros((N_blocks, K - 1)) if initial_v is None else jnp.asarray(initial_v)[:, :K - 1]
 
     @jax.jit
     def _core(key, mu_init, L_inv_init, v_init, ctx):
@@ -145,16 +151,22 @@ def cartest_batched_rne_blocks_solver(
         final_v = final_state[2]
         return final_mu, final_L, final_pi, final_v, metrics_history
 
-    final_mu, final_L, final_pi, final_v, metrics_history = _core(
-        key, initial_mu, initial_L_inv, v_init, ctx
-    )
-    return {
-        "mu": final_mu,
-        "L_inv": final_L,
-        "S_or_L": final_L,
-        "pi": final_pi,
-        "v": final_v,
-        "block_to_agent": block_to_agent,
-        "dims": dims,
-        "metrics": metrics_history,
-    }
+    def _solve(key, *, context, initial_mu, initial_L_inv, initial_v=None):
+        ctx = {k: jnp.asarray(v) for k, v in context.items()}
+        v_init = (jnp.zeros((N_blocks, K - 1)) if initial_v is None
+                  else jnp.asarray(initial_v)[:, :K - 1])
+        final_mu, final_L, final_pi, final_v, metrics_history = _core(
+            key, initial_mu, initial_L_inv, v_init, ctx
+        )
+        return {
+            "mu": final_mu,
+            "L_inv": final_L,
+            "S_or_L": final_L,
+            "pi": final_pi,
+            "v": final_v,
+            "block_to_agent": block_to_agent,
+            "dims": dims,
+            "metrics": metrics_history,
+        }
+
+    return _solve
