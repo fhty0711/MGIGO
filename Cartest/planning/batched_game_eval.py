@@ -15,10 +15,11 @@ from Constraintdealer.Constran import (
     sigma_k,
     OBJ_PRESETS,
     OBJ_TRANSFORM_STANDARD,
-    TRANSFORM_SOFT,
-    TRANSFORM_HARD,
 )
-from Cartest.planning.costs.three_agent_track import _collision_prefix
+from Cartest.planning.costs.three_agent_track import (
+    _collision_prefix,
+    three_agent_batched_layers,
+)
 
 
 def agent_ctx(ctx, agent_idx):
@@ -190,18 +191,8 @@ def batched_constraint_violations_from_plans(plans, scenario):
     return tuple(_violations_for_agent(plans, scenario, aid) for aid in range(3))
 
 
-# Constraint layer config for three_agent_track, ordered by priority
-# (low -> high = innermost -> outermost), mirroring the Deterministic specs:
-#   lane(soft,q95) speed(soft,max) acc(soft,max) jerk(soft,max) collision(hard,max)
-# Each entry: (name, aggregate, transform_table, baseline, resolution).
-# resolution = first knot of the transform table (the mode's "分辨率").
-_THREE_AGENT_LAYERS = [
-    ("lane", "q95", TRANSFORM_SOFT, 0.5, float(TRANSFORM_SOFT[0][0])),
-    ("speed", "max", TRANSFORM_SOFT, 0.5, float(TRANSFORM_SOFT[0][0])),
-    ("acc", "max", TRANSFORM_SOFT, 0.5, float(TRANSFORM_SOFT[0][0])),
-    ("jerk", "max", TRANSFORM_SOFT, 0.5, float(TRANSFORM_SOFT[0][0])),
-    ("collision", "max", TRANSFORM_HARD, 2.0, float(TRANSFORM_HARD[0][0])),
-]
+# Static JIT metadata compiled from the same definitions used by scalar specs.
+_THREE_AGENT_LAYERS = three_agent_batched_layers()
 
 
 def _obj_table(obj_transform):

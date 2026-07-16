@@ -18,6 +18,34 @@ from Cartest.planning.costs.game_2a_basic import (
 )
 
 
+THREE_AGENT_CONSTRAINT_DEFS = (
+    ("lane", "soft", 1, "q95", "soft"),
+    ("speed", "soft", 2, "max", "soft"),
+    ("acc", "soft", 3, "max", "soft"),
+    ("jerk", "soft", 4, "max", "soft"),
+    ("collision", "hard", 5, "max", "hard"),
+)
+
+
+def _make_constraint_from_definition(definition, g_fn):
+    _name, mode, priority, aggregate, transform = definition
+    return Deterministic(g_fn, mode=mode, priority=priority,
+                         aggregate=aggregate, transform=transform)
+
+
+def three_agent_batched_layers():
+    """Compile static nesting metadata through the real ConstraintSpec rules."""
+    placeholder = lambda x, ctx: x
+    layers = []
+    for definition in THREE_AGENT_CONSTRAINT_DEFS:
+        name = definition[0]
+        spec = _make_constraint_from_definition(definition, placeholder)
+        table = spec.get_transform_table()
+        resolution = float(table[0][0]) if table is not None else 0.0
+        layers.append((name, spec.aggregate, table, spec.baseline, resolution))
+    return tuple(layers)
+
+
 def _collision_prefix(scenario):
     """Short-horizon slice that includes the state executed by the MPC."""
     execute_index = int(scenario.get("game", {}).get("execute_index", 1))
@@ -159,17 +187,16 @@ def make_agent_specs(gen, scenario):
         return collision_g
 
     def make_constraints(agent_idx):
+        violation_fns = {
+            "lane": make_lane_g(agent_idx),
+            "speed": make_speed_g(agent_idx),
+            "acc": make_acc_g(agent_idx),
+            "jerk": make_jerk_g(agent_idx),
+            "collision": make_collision_g(agent_idx),
+        }
         return [
-            Deterministic(make_lane_g(agent_idx), mode="soft", priority=1,
-                          aggregate="q95", transform="soft"),
-            Deterministic(make_speed_g(agent_idx), mode="soft", priority=2,
-                          aggregate="max", transform="soft"),
-            Deterministic(make_acc_g(agent_idx), mode="soft", priority=3,
-                          aggregate="max", transform="soft"),
-            Deterministic(make_jerk_g(agent_idx), mode="soft", priority=4,
-                          aggregate="max", transform="soft"),
-            Deterministic(make_collision_g(agent_idx), mode="hard", priority=5,
-                          aggregate="max", transform="hard"),
+            _make_constraint_from_definition(definition, violation_fns[definition[0]])
+            for definition in THREE_AGENT_CONSTRAINT_DEFS
         ]
 
     return {

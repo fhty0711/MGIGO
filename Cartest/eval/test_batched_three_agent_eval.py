@@ -172,9 +172,39 @@ def test_collision_prefix_includes_execute_index_for_scalar_and_batched_paths():
         assert values[4] == 0.0
 
 
+def test_scalar_and_batched_constraints_share_layer_metadata():
+    from Cartest.planning.costs.three_agent_track import (
+        THREE_AGENT_CONSTRAINT_DEFS,
+        three_agent_batched_layers,
+    )
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
+    scalar_specs = make_agent_specs(gen, scenario)[0][1]
+    batched_layers = three_agent_batched_layers()
+
+    assert [definition[0] for definition in THREE_AGENT_CONSTRAINT_DEFS] == [
+        "lane", "speed", "acc", "jerk", "collision",
+    ]
+    assert len(scalar_specs) == len(batched_layers)
+    for definition, spec, layer in zip(
+            THREE_AGENT_CONSTRAINT_DEFS, scalar_specs, batched_layers):
+        name, mode, priority, aggregate, transform = definition
+        layer_name, layer_aggregate, table, baseline, resolution = layer
+        assert layer_name == name
+        assert (spec.mode, spec.priority, spec.aggregate, spec.transform) == (
+            mode, priority, aggregate, transform)
+        assert layer_aggregate == spec.aggregate
+        assert baseline == spec.baseline
+        assert resolution == float(spec.get_transform_table()[0][0])
+        assert jnp.array_equal(table[0], spec.get_transform_table()[0])
+        assert jnp.array_equal(table[1], spec.get_transform_table()[1])
+
+
 if __name__ == "__main__":
     test_batched_plan_eval_shapes_match_three_agents()
     test_batched_agent_cost_matches_scalar_cost_for_fixed_joint_samples()
     test_batched_nested_cost_matches_constran_scalar_specs()
     test_collision_prefix_includes_execute_index_for_scalar_and_batched_paths()
+    test_scalar_and_batched_constraints_share_layer_metadata()
     print("batched three-agent eval tests ok")
