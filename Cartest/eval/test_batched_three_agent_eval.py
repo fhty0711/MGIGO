@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 import jax
 jax.config.update("jax_default_matmul_precision", "highest")
@@ -113,8 +114,67 @@ def test_batched_nested_cost_matches_constran_scalar_specs():
     assert jnp.allclose(batched, scalar, rtol=2e-4, atol=2e-3)
 
 
+def _collision_fixture_plans():
+    horizon = 5
+    ego_x = jnp.array([100.0, 100.0, 100.0, 0.0, 100.0])
+    front_x = jnp.array([10.0, 10.0, 10.0, 0.0, 10.0])
+    rear_x = jnp.array([20.0, 20.0, 20.0, 0.0, 20.0])
+    zeros = jnp.zeros(horizon)
+    vehicle = jnp.zeros((horizon, 9))
+
+    def scalar_plan(s, x):
+        frenet = (s, zeros, zeros, zeros, zeros, zeros, zeros, zeros)
+        return frenet, vehicle, (x, zeros)
+
+    scalar = (
+        scalar_plan(jnp.zeros(horizon), ego_x),
+        scalar_plan(jnp.full(horizon, 100.0), front_x),
+        scalar_plan(jnp.zeros(horizon), rear_x),
+    )
+
+    def batched_plan(s, x):
+        return {
+            "s": s[None], "d": zeros[None], "vehicle": vehicle[None],
+            "x": x[None], "y": zeros[None],
+        }
+
+    batched = (
+        batched_plan(jnp.zeros(horizon), ego_x),
+        batched_plan(jnp.full(horizon, 100.0), front_x),
+        batched_plan(jnp.zeros(horizon), rear_x),
+    )
+    return scalar, batched
+
+
+def test_collision_prefix_includes_execute_index_for_scalar_and_batched_paths():
+    from Cartest.planning import batched_game_eval
+    from Cartest.planning.costs import three_agent_track as scalar_cost
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    scenario["game"]["execute_index"] = 3
+    scalar_plans, batched_plans = _collision_fixture_plans()
+
+    class FakeGen:
+        T = 5
+
+    specs = scalar_cost.make_agent_specs(FakeGen(), scenario)
+    with patch.object(scalar_cost, "_prepared_plans", return_value=scalar_plans):
+        scalar_front = specs[1][1][-1].g_fn(jnp.zeros(1), {})
+        scalar_rear = specs[2][1][-1].g_fn(jnp.zeros(1), {})
+
+    batched_front = batched_game_eval._violations_for_agent(
+        batched_plans, scenario, 1)["collision"][0]
+    batched_rear = batched_game_eval._violations_for_agent(
+        batched_plans, scenario, 2)["collision"][0]
+
+    for values in (scalar_front, scalar_rear, batched_front, batched_rear):
+        assert values[3] > 0.0
+        assert values[4] == 0.0
+
+
 if __name__ == "__main__":
     test_batched_plan_eval_shapes_match_three_agents()
     test_batched_agent_cost_matches_scalar_cost_for_fixed_joint_samples()
     test_batched_nested_cost_matches_constran_scalar_specs()
+    test_collision_prefix_includes_execute_index_for_scalar_and_batched_paths()
     print("batched three-agent eval tests ok")

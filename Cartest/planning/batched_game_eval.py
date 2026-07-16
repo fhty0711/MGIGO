@@ -18,6 +18,7 @@ from Constraintdealer.Constran import (
     TRANSFORM_SOFT,
     TRANSFORM_HARD,
 )
+from Cartest.planning.costs.three_agent_track import _collision_prefix
 
 
 def agent_ctx(ctx, agent_idx):
@@ -156,13 +157,13 @@ def _violations_for_agent(plans, scenario, aid):
         jnp.maximum(jnp.maximum(0.0, jnp.abs(j_lat) - jerk_max), jnp.maximum(0.0, j_mag - jerk_max)),
     )
 
+    short = _collision_prefix(scenario)
     if aid == 0:
         col = jnp.maximum(
             pair_distance_violation(plan["x"], plan["y"], plans[1]["x"], plans[1]["y"], safe_gap),
             pair_distance_violation(plan["x"], plan["y"], plans[2]["x"], plans[2]["y"], safe_gap),
         )
     elif aid == 1:
-        short = slice(0, 2)
         col = jnp.zeros_like(plan["x"])
         ego_short = pair_distance_violation(
             plan["x"][..., short], plan["y"][..., short],
@@ -172,7 +173,6 @@ def _violations_for_agent(plans, scenario, aid):
             plans[2]["x"][..., short], plans[2]["y"][..., short], safe_gap)
         col = col.at[..., short].set(jnp.maximum(ego_short, rear_short))
     else:
-        short = slice(0, 2)
         col = jnp.zeros_like(plan["x"])
         ego_short = pair_distance_violation(
             plan["x"][..., short], plan["y"][..., short],
@@ -343,6 +343,7 @@ def _collision_aggregate_bm(candidate, backgrounds, scenario, aid):
     """Collision aggregate shaped [B, M_inner] for one acting agent."""
     safe_gap = float(scenario["safety"].get("safe_gap", 3.0))
     vehicle_length = float(scenario["safety"].get("vehicle_length", 5.0))
+    short = _collision_prefix(scenario)
     own = dict(candidate[aid], safe_gap=safe_gap)
 
     if aid == 0:
@@ -355,13 +356,13 @@ def _collision_aggregate_bm(candidate, backgrounds, scenario, aid):
     if aid == 1:
         ego = backgrounds[0]
         rear = backgrounds[2]
-        front_ego = _pair_distance_violation_bm(own, ego)[..., :2]
-        front_rear = _pair_distance_violation_bm(own, rear)[..., :2]
+        front_ego = _pair_distance_violation_bm(own, ego)[..., short]
+        front_rear = _pair_distance_violation_bm(own, rear)[..., short]
         return jnp.max(jnp.maximum(front_ego, front_rear), axis=-1)
 
     ego = backgrounds[0]
     front = backgrounds[1]
-    rear_ego_short = _pair_distance_violation_bm(own, ego)[..., :2]
+    rear_ego_short = _pair_distance_violation_bm(own, ego)[..., short]
     rear_ego = jnp.max(rear_ego_short, axis=-1)
     clearance = vehicle_length + safe_gap
     clearance_violation = jnp.maximum(

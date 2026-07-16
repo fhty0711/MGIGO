@@ -18,6 +18,12 @@ from Cartest.planning.costs.game_2a_basic import (
 )
 
 
+def _collision_prefix(scenario):
+    """Short-horizon slice that includes the state executed by the MPC."""
+    execute_index = int(scenario.get("game", {}).get("execute_index", 1))
+    return slice(0, max(1, execute_index + 1))
+
+
 def eval_joint_plans(gen, joint_x, ctx, agent_count=3):
     """Evaluate all agent B-spline plans once for a joint decision vector."""
     return tuple(_eval_agent_plan(gen, joint_x, ctx, idx) for idx in range(agent_count))
@@ -124,6 +130,7 @@ def make_agent_specs(gen, scenario):
     def make_collision_g(agent_idx):
         def collision_g(joint_x, ctx):
             plans = _prepared_plans(gen, joint_x, ctx, agent_count)
+            short = _collision_prefix(scenario)
             fr_i, _st_i, (xi, yi) = plans[agent_idx]
             if agent_idx == 0:
                 _fr_f, _st_f, (xf, yf) = plans[1]
@@ -133,7 +140,6 @@ def make_agent_specs(gen, scenario):
             if agent_idx == 1:
                 _fr_e, _st_e, (xe, ye) = plans[0]
                 _fr_r, _st_r, (xr, yr) = plans[2]
-                short = slice(0, 2)
                 out = jnp.zeros(gen.T)
                 values = pair_distance_violation(xi[short], yi[short],
                                                  xe[short], ye[short], safe_gap)
@@ -143,7 +149,6 @@ def make_agent_specs(gen, scenario):
 
             _fr_e, _st_e, (xe, ye) = plans[0]
             fr_f, _st_f, _cart_f = plans[1]
-            short = slice(0, 2)
             out = jnp.zeros(gen.T)
             ego_values = pair_distance_violation(xi[short], yi[short],
                                                  xe[short], ye[short], safe_gap)
