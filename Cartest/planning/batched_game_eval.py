@@ -248,30 +248,79 @@ def batched_nested_costs_from_plans(plans, scenario, k_inner=1.0, obj_transform=
 # Fixed-sample expected cost (f_hat) for one agent
 # ───────────────────────────────────────────────────────────────────────
 
+def evaluate_agent_control_batch(gen, ctrl_s_batch, ctrl_d_batch, ctx, agent_idx):
+    """Evaluate controls shaped [batch, n_free] for one agent only."""
+    a_ctx = agent_ctx(ctx, agent_idx)
+
+    def one(ctrl_s, ctrl_d):
+        frenet, vehicle, (x, y) = gen.evaluate_plan(ctrl_s, ctrl_d, a_ctx)
+        s, d, s_dot, d_dot, s_ddot, d_ddot, s_dddot, d_dddot = frenet
+        return {
+            "s": s,
+            "d": d,
+            "s_dot": s_dot,
+            "d_dot": d_dot,
+            "s_ddot": s_ddot,
+            "d_ddot": d_ddot,
+            "s_dddot": s_dddot,
+            "d_dddot": d_dddot,
+            "vehicle": vehicle,
+            "x": x,
+            "y": y,
+        }
+
+    return vmap(one)(ctrl_s_batch, ctrl_d_batch)
+
+
+def _plans_for_agent_source(gen, source, ctx, agent_idx):
+    """Evaluate one agent's plan from a block sample tensor [N_blocks, batch, D]."""
+    s_block = agent_idx * 2
+    d_block = s_block + 1
+    return evaluate_agent_control_batch(gen, source[s_block], source[d_block], ctx, agent_idx)
+
+
+def _broadcast_plan(plan, B, M_inner, use_candidate):
+    """Tile a [N, ...] plan into [B * M_inner, ...] for pairwise pairing.
+
+    Candidate plans (N=B) are repeated across the M_inner axis; background
+    plans (N=M_inner) are repeated across the B axis.  Row ``b * M_inner + m``
+    then carries candidate ``b`` (for the acting agent) and background ``m``
+    (for the opponents), matching the joint construction in MPC_G_MS.
+    """
+    if use_candidate:
+        return {key: jnp.repeat(value[:, None, ...], M_inner, axis=1)
+                       .reshape((B * M_inner,) + value.shape[1:])
+                for key, value in plan.items()}
+    return {key: jnp.repeat(value[None, :, ...], B, axis=0)
+                   .reshape((B * M_inner,) + value.shape[1:])
+            for key, value in plan.items()}
+
+
 def batched_expected_cost_for_agent(gen, samples_b, samples_m, ctx, scenario, agent_idx):
     """Compute f_hat[B] for one agent from fixed block samples.
 
     samples_b: [N_blocks, B, D]       candidate (own-action) samples
     samples_m: [N_blocks, M_inner, D] background (opponent) samples
 
-    For each candidate b, the agent's own blocks are taken from samples_b[b]
-    and all other blocks from background samples_m[m]; the expected cost is
-    averaged over m.  This mirrors the joint construction in
-    ``MPC_G_MS._step_fn_rne_blocks.evaluate_agent_expected_cost``.
+    Trajectories are evaluated only ``B + 2 * M_inner`` times (the acting
+    agent's B candidates plus each opponent's M_inner backgrounds) and then
+    broadcast over the B x M_inner pairing - instead of evaluating all
+    ``B * M_inner`` joint trajectories.  The pairwise game cost is computed
+    by broadcasting the cached ego/front/rear plans.
     """
-    block_to_agent = jnp.asarray(scenario["game"]["block_to_agent"])
-    block_mask = block_to_agent == agent_idx
     B = samples_b.shape[1]
     M_inner = samples_m.shape[1]
 
-    def joint_for_bm(b_idx, m_idx):
-        joint_blocks = jnp.where(block_mask[:, None], samples_b[:, b_idx, :], samples_m[:, m_idx, :])
-        return joint_blocks.reshape(-1)
+    # Only the plans actually needed: the agent's own candidates (from
+    # samples_b) and the other agents' backgrounds (from samples_m).
+    plans = [None, None, None]
+    plans[agent_idx] = _plans_for_agent_source(gen, samples_b, ctx, agent_idx)
+    for aid in range(3):
+        if aid != agent_idx:
+            plans[aid] = _plans_for_agent_source(gen, samples_m, ctx, aid)
 
-    joints = vmap(
-        lambda b: vmap(lambda m: joint_for_bm(b, m))(jnp.arange(M_inner))
-    )(jnp.arange(B))
-    flat_joints = joints.reshape((B * M_inner, -1))
-    plans = evaluate_joint_plan_batch(gen, flat_joints, ctx, agent_count=3)
-    costs = batched_nested_costs_from_plans(plans, scenario)
+    broadcast = tuple(
+        _broadcast_plan(plans[aid], B, M_inner, aid == agent_idx) for aid in range(3)
+    )
+    costs = batched_nested_costs_from_plans(broadcast, scenario)
     return costs[:, agent_idx].reshape((B, M_inner)).mean(axis=1)

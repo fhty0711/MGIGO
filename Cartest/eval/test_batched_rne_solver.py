@@ -73,6 +73,32 @@ def test_batched_f_hat_matches_black_box_scalar_loop():
         assert jnp.allclose(actual, expected, rtol=2e-4, atol=2e-3)
 
 
+def test_batched_f_hat_uses_b_plus_m_trajectory_evaluations(monkeypatch=None):
+    from Cartest.planning import batched_game_eval
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
+    ctx = build_multi_agent_context(_states(scenario))
+    samples_b, samples_m = _make_samples(gen, scenario)
+
+    counts = {"calls": 0}
+    original = batched_game_eval.evaluate_agent_control_batch
+
+    def counted(*args, **kwargs):
+        counts["calls"] += 1
+        return original(*args, **kwargs)
+
+    batched_game_eval.evaluate_agent_control_batch = counted
+    try:
+        _ = batched_game_eval.batched_expected_cost_for_agent(gen, samples_b, samples_m, ctx, scenario, 0)
+    finally:
+        batched_game_eval.evaluate_agent_control_batch = original
+
+    # Agent 0 needs: ego B candidates + front M backgrounds + rear M backgrounds.
+    assert counts["calls"] == 3
+
+
 if __name__ == "__main__":
     test_batched_f_hat_matches_black_box_scalar_loop()
+    test_batched_f_hat_uses_b_plus_m_trajectory_evaluations()
     print("batched rne helper tests ok")
