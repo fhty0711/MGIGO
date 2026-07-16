@@ -11,6 +11,10 @@ from Cartest.planning.scenarios.three_blocking import SCENARIO as THREE_BLOCKING
 from Cartest.planning.scenarios.circle_track import SCENARIO as CIRCLE_TRACK
 from Cartest.planning.scenarios.lane_borrow_overtake import SCENARIO as LANE_BORROW_OVERTAKE
 from Cartest.planning.scenarios.curved_cruise import SCENARIO as CURVED_CRUISE
+from Cartest.planning.scenarios.game_2a_basic import SCENARIO as GAME_2A_BASIC
+from Cartest.planning.scenarios.game_2b_constran import SCENARIO as GAME_2B_CONSTRAN
+from Cartest.planning.scenarios.game_2b_asymmetric import SCENARIO as GAME_2B_ASYMMETRIC
+from Cartest.planning.scenarios.three_agent_track import SCENARIO as THREE_AGENT_TRACK
 
 
 SCENARIOS = {
@@ -20,6 +24,10 @@ SCENARIOS = {
     "circle_track": CIRCLE_TRACK,
     "lane_borrow_overtake": LANE_BORROW_OVERTAKE,
     "curved_cruise": CURVED_CRUISE,
+    "game_2a_basic": GAME_2A_BASIC,
+    "game_2b_constran": GAME_2B_CONSTRAN,
+    "game_2b_asymmetric": GAME_2B_ASYMMETRIC,
+    "three_agent_track": THREE_AGENT_TRACK,
 }
 
 
@@ -30,6 +38,11 @@ def get_scenario(name: str):
     except KeyError as exc:
         available = ", ".join(sorted(SCENARIOS))
         raise ValueError(f"Unknown scenario {name!r}. Available: {available}") from exc
+
+
+def scenario_kind(scenario):
+    """Return the scenario execution kind."""
+    return scenario.get("type", "single_agent")
 
 
 def make_initial_state(scenario):
@@ -147,7 +160,8 @@ __all__ = [
     "EMPTY", "SINGLE_OFFSET", "THREE_BLOCKING", "CIRCLE_TRACK",
     "LANE_BORROW_OVERTAKE",
     "CURVED_CRUISE",
+    "GAME_2A_BASIC", "GAME_2B_CONSTRAN", "GAME_2B_ASYMMETRIC", "THREE_AGENT_TRACK",
     "SCENARIOS", "get_scenario", "make_initial_state",
+    "scenario_kind",
     "build_obstacle_predictions", "build_obstacles", "first_frame_obstacles",
 ]
-from Cartest.planning.scenarios.curved_cruise import SCENARIO as CURVED_CRUISE

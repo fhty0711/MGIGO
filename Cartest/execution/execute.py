@@ -32,7 +32,7 @@ class FrenetState:
         }
 
 
-def execute_perfect_tracking(s, d, s_dot, d_dot, s_ddot, d_ddot, psi_next):
+def execute_perfect_tracking_at(s, d, s_dot, d_dot, s_ddot, d_ddot, psi, index=1):
     """Use plan's predicted next state directly (perfect tracking assumption).
 
     The plan already produces a consistent trajectory through the B-spline
@@ -42,11 +42,22 @@ def execute_perfect_tracking(s, d, s_dot, d_dot, s_ddot, d_ddot, psi_next):
 
     Args:
         s, d, s_dot, d_dot, s_ddot, d_ddot: Frenet trajectory arrays [T]
-        psi_next: vehicle heading at t=1 from to_vehicle_states
+        psi: vehicle heading trajectory from to_vehicle_states
+        index: plan sample to execute
 
     Returns:
-        FrenetState at t=1
+        FrenetState at the requested plan sample
     """
+    index = max(1, min(int(index), len(s) - 1))
+    return FrenetState(
+        s=float(s[index]), s_dot=float(s_dot[index]), s_ddot=float(s_ddot[index]),
+        d=float(d[index]), d_dot=float(d_dot[index]), d_ddot=float(d_ddot[index]),
+        psi=float(psi[index]),
+    )
+
+
+def execute_perfect_tracking(s, d, s_dot, d_dot, s_ddot, d_ddot, psi_next):
+    """Backward-compatible t=1 perfect-tracking execution helper."""
     return FrenetState(
         s=float(s[1]), s_dot=float(s_dot[1]), s_ddot=float(s_ddot[1]),
         d=float(d[1]), d_dot=float(d_dot[1]), d_ddot=float(d_ddot[1]),

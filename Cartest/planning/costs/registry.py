@@ -12,6 +12,9 @@ from __future__ import annotations
 
 from Cartest.planning.costs.default_lyapunov import make_cost as make_default_lyapunov
 from Cartest.planning.costs.lane_borrow_overtake import make_cost as make_lane_borrow_overtake
+from Cartest.planning.costs import game_2a_basic as game_2a_basic_cost
+from Cartest.planning.costs import game_2b_constran as game_2b_constran_cost
+from Cartest.planning.costs import three_agent_track as three_agent_track_cost
 
 
 COST_FACTORIES = {}
@@ -109,3 +112,22 @@ def make_constraint_config_from_scenario(scenario):
 
 register_cost("default_lyapunov", make_default_lyapunov)
 register_cost("lane_borrow_overtake", make_lane_borrow_overtake)
+
+
+GAME_AGENT_SPEC_FACTORIES = {
+    "game_2a_basic": game_2a_basic_cost.make_agent_specs,
+    "game_2b_constran": game_2b_constran_cost.make_agent_specs,
+    "three_agent_track": three_agent_track_cost.make_agent_specs,
+}
+
+
+def make_agent_specs_from_scenario(gen, scenario):
+    """Build per-agent objective/constraint specs for a multi-agent game scenario."""
+    cost_name, _cost_params, _factory = get_cost_spec(scenario)
+    try:
+        return GAME_AGENT_SPEC_FACTORIES[cost_name](gen, scenario)
+    except KeyError as exc:
+        available = ", ".join(sorted(GAME_AGENT_SPEC_FACTORIES))
+        raise ValueError(
+            f"Unknown game cost {cost_name!r}. Available: {available}"
+        ) from exc

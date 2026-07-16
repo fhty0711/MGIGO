@@ -6,6 +6,11 @@ dist/
 wheels/
 *.egg-info
 
+# Cartest demo outputs
+Cartest/*.gif
+Cartest/*.npz
+Cartest/output/
+
 # Virtual environments
 .venv
 venv/
