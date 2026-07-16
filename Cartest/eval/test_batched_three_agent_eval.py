@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 
 import jax
+jax.config.update("jax_default_matmul_precision", "highest")
 import jax.numpy as jnp
 
 ROOT = Path(__file__).resolve().parents[2]
