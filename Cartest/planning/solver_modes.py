@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import jax.numpy as jnp
+import numpy as np
 from jax import random
 
 from Cartest.planning.constraints import make_constraints as _make_constraints
@@ -27,6 +28,22 @@ from Constraintdealer.Constran import Deterministic
 from Cartest.planning.costs.default_lyapunov import DEFAULT_CONSTRAINTS
 from gmm_igo.solver_builder import build_solver, build_nash_solver, NashResult, SolverResult
 from Cartest.planning.costs.registry import make_agent_specs_from_scenario
+
+
+def _pi_to_v(initial_pi):
+    """Validate simplex probabilities and convert them to natural parameters."""
+    pi_np = np.asarray(initial_pi)
+    if pi_np.ndim < 1 or pi_np.shape[-1] < 2:
+        raise ValueError("initial_pi must have at least two components")
+    if not np.all(np.isfinite(pi_np)):
+        raise ValueError("initial_pi must contain only finite values")
+    if np.any(pi_np <= 0.0):
+        raise ValueError("initial_pi probabilities must be strictly positive")
+    if not np.allclose(np.sum(pi_np, axis=-1), 1.0, rtol=1e-6, atol=1e-6):
+        raise ValueError("initial_pi probabilities must sum to one")
+
+    pi = jnp.asarray(initial_pi)
+    return jnp.log(pi[..., :-1] / pi[..., -1:])
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -375,7 +392,6 @@ def _build_cartest_batched_solver(gen, scenario, dims):
 
     def _solve(key, *, context=None, initial_mu=None, initial_S_or_L=None,
                initial_pi=None, warm_start=None):
-        del initial_pi
         mu = initial_mu
         L_inv = initial_S_or_L
         v = None
@@ -386,6 +402,8 @@ def _build_cartest_batched_solver(gen, scenario, dims):
             if L_inv is None:
                 L_inv = ws.get("L_inv", ws.get("S_or_L"))
             v = ws.get("v")
+        if initial_pi is not None:
+            v = _pi_to_v(initial_pi)
         if mu is None or L_inv is None:
             raise ValueError(
                 "cartest_batched_rne_blocks requires initial_mu and initial_S_or_L"

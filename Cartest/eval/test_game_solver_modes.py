@@ -171,6 +171,78 @@ def test_three_agent_track_uses_cartest_batched_rne_solver_mode():
     assert scenario["game"]["solver"] == "cartest_batched_rne_blocks"
 
 
+def test_cartest_batched_initial_pi_converts_to_natural_parameters():
+    from Cartest.planning.solver_modes import _pi_to_v
+    from Cartest.planning.batched_rne_solver import _v_to_pi
+
+    pi = jnp.array([[0.2, 0.3, 0.5], [0.6, 0.1, 0.3]])
+    recovered = jax.vmap(_v_to_pi)(_pi_to_v(pi))
+    assert jnp.allclose(recovered, pi)
+
+
+def test_cartest_batched_initial_pi_rejects_invalid_probabilities():
+    from Cartest.planning.solver_modes import _pi_to_v
+
+    invalid = (
+        jnp.array([[0.0, 0.5, 0.5]]),
+        jnp.array([[-0.1, 0.6, 0.5]]),
+        jnp.array([[jnp.inf, 0.4, 0.6]]),
+        jnp.array([[0.2, 0.2, 0.2]]),
+    )
+    for pi in invalid:
+        try:
+            _pi_to_v(pi)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid initial_pi accepted: {pi}")
+
+
+def test_cartest_batched_explicit_initial_pi_overrides_warm_start_v():
+    from Cartest.planning import batched_game_eval, batched_rne_solver
+    from Cartest.planning.solver_modes import _build_cartest_batched_solver, _pi_to_v
+
+    captured = {}
+    blocks, components, dim = 6, 2, 1
+
+    def fake_factory(*_args, **_kwargs):
+        def fake_solver(_key, *, context, initial_mu, initial_L_inv, initial_v):
+            del context
+            captured["initial_v"] = initial_v
+            return {
+                "mu": initial_mu,
+                "L_inv": initial_L_inv,
+                "pi": jnp.full((blocks, components), 0.5),
+                "v": initial_v,
+                "metrics": {},
+            }
+        return fake_solver
+
+    class FakeGen:
+        n_free = dim
+
+    scenario = {
+        "agents": ({}, {}, {}),
+        "game": {"block_to_agent": (0, 0, 1, 1, 2, 2)},
+    }
+    mu = jnp.zeros((blocks, components, dim))
+    L_inv = jnp.ones((blocks, components, dim, dim))
+    initial_pi = jnp.tile(jnp.array([[0.8, 0.2]]), (blocks, 1))
+    warm_v = jnp.full((blocks, components - 1), -9.0)
+
+    with patch.object(batched_rne_solver, "make_cartest_batched_rne_blocks_solver",
+                      side_effect=fake_factory), \
+         patch.object(batched_game_eval, "evaluate_joint_plan_batch", return_value=None), \
+         patch.object(batched_game_eval, "batched_nested_costs_from_plans",
+                      return_value=jnp.zeros((1, 3))):
+        solver = _build_cartest_batched_solver(FakeGen(), scenario, (dim,) * blocks)
+        solver(jax.random.PRNGKey(0), context={}, initial_mu=mu,
+               initial_S_or_L=L_inv, initial_pi=initial_pi,
+               warm_start={"v": warm_v})
+
+    assert jnp.allclose(captured["initial_v"], _pi_to_v(initial_pi))
+
+
 if __name__ == "__main__":
     test_nash_solver_exposes_block_level_diagnostics()
     test_game_agent_specs_return_finite_costs()
@@ -178,6 +250,9 @@ if __name__ == "__main__":
     test_three_agent_track_uses_constran_constraints_and_valid_scene()
     test_three_agent_track_cost_prepares_joint_plans_once_per_agent_cost()
     test_three_agent_track_uses_cartest_batched_rne_solver_mode()
+    test_cartest_batched_initial_pi_converts_to_natural_parameters()
+    test_cartest_batched_initial_pi_rejects_invalid_probabilities()
+    test_cartest_batched_explicit_initial_pi_overrides_warm_start_v()
     print("game solver modes tests ok")
 
 

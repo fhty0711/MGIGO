@@ -48,6 +48,11 @@ def _tie_aware_elite_weights(f_hats, elite_count):
                      jnp.where(tied, boundary_weight, 0.0))
 
 
+def _should_reset_mixture_weights(t, period):
+    """Reset periodically after, but never during, the initial iteration."""
+    return jnp.logical_and(t > 0, (t % period) == 0)
+
+
 def _sample_all_blocks(mu, S, pi_all, count, key):
     """Sample ``count`` points per block from the block GMMs.
 
@@ -127,7 +132,7 @@ def make_cartest_batched_rne_blocks_solver(
 
         def step_fn(state, step_key):
             mu_t, S_t, v_t, t = state
-            v_t = jnp.where((t % T_0) == 0, v_reset, v_t)
+            v_t = jnp.where(_should_reset_mixture_weights(t, T_0), v_reset, v_t)
             pi_all = vmap(_v_to_pi)(v_t)  # [N_blocks, K]
 
             key_B, key_M = random.split(step_key)
