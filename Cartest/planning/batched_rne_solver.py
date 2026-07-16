@@ -20,7 +20,7 @@ import jax.numpy as jnp
 from jax import random, lax, vmap
 
 from gmm_igo.MPC_G_MS import _update_block_component_core
-from Cartest.planning.batched_game_eval import batched_expected_cost_for_agent
+from Cartest.planning.batched_game_eval import batched_expected_costs_for_all_agents
 
 
 def _v_to_pi(v_m):
@@ -111,24 +111,16 @@ def cartest_batched_rne_blocks_solver(
             samples_B = _sample_all_blocks(mu_t, S_t, pi_all, B, key_B)     # [N_blocks, B, D]
             samples_M = _sample_all_blocks(mu_t, S_t, pi_all, M_inner, key_M)  # [N_blocks, M_inner, D]
 
-            def agent_f_hat(agent_idx):
-                f_hat = batched_expected_cost_for_agent(
-                    gen, samples_B, samples_M, ctx, scenario, agent_idx,
-                    k_inner=k_inner, obj_transform=obj_transform)      # [B]
-                ranks = jnp.argsort(jnp.argsort(f_hat))
-                elite_weights = jnp.where(ranks < B0, 1.0 / B, 0.0)
-                return elite_weights, jnp.mean(f_hat)
-
-            # M_agent is static -> unroll so batched_expected_cost_for_agent
-            # sees a concrete agent_idx (its Python control flow needs it).
-            agent_w, mean_fit = [], []
-            for aid in range(M_agent):
-                w, m = agent_f_hat(aid)
-                agent_w.append(w)
-                mean_fit.append(m)
-            agent_w_hat = jnp.stack(agent_w)          # [M_agent, B]
-            mean_fitness = jnp.stack(mean_fit)        # [M_agent]
-            block_w_hat = agent_w_hat[block_to_agent_arr]  # [N_blocks, B]
+            # Shared plan cache: 6 trajectory-eval calls total (3 candidates
+            # from samples_B + 3 backgrounds from samples_M), reused across
+            # all agents. Only each agent's own nested cost is computed.
+            f_hats = batched_expected_costs_for_all_agents(
+                gen, samples_B, samples_M, ctx, scenario,
+                k_inner=k_inner, obj_transform=obj_transform)              # [M_agent, B]
+            ranks = jnp.argsort(jnp.argsort(f_hats, axis=-1), axis=-1)     # [M_agent, B]
+            agent_w_hat = jnp.where(ranks < B0, 1.0 / B, 0.0)              # [M_agent, B]
+            mean_fitness = jnp.mean(f_hats, axis=-1)                       # [M_agent]
+            block_w_hat = agent_w_hat[block_to_agent_arr]                  # [N_blocks, B]
 
             def update_block(b_idx):
                 D_m = dims_arr[b_idx]

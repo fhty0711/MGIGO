@@ -121,8 +121,27 @@ def test_cartest_batched_rne_solver_runs_small_problem():
     assert jnp.all(jnp.isfinite(result["mu"]))
 
 
+def test_batched_costs_for_all_agents_matches_per_agent():
+    from Cartest.planning.batched_game_eval import (
+        batched_expected_cost_for_agent, batched_expected_costs_for_all_agents)
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
+    ctx = build_multi_agent_context(_states(scenario))
+    samples_b, samples_m = _make_samples(gen, scenario)
+
+    per_agent = jnp.stack([
+        batched_expected_cost_for_agent(gen, samples_b, samples_m, ctx, scenario, aid)
+        for aid in range(3)
+    ])  # [3, B]
+    all_agents = batched_expected_costs_for_all_agents(gen, samples_b, samples_m, ctx, scenario)
+    assert all_agents.shape == per_agent.shape
+    assert jnp.allclose(all_agents, per_agent, rtol=2e-4, atol=2e-3)
+
+
 if __name__ == "__main__":
     test_batched_f_hat_matches_black_box_scalar_loop()
     test_batched_f_hat_uses_b_plus_m_trajectory_evaluations()
+    test_batched_costs_for_all_agents_matches_per_agent()
     test_cartest_batched_rne_solver_runs_small_problem()
     print("batched rne helper tests ok")
