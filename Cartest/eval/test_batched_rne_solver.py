@@ -131,6 +131,32 @@ def test_fast_sampling_avoids_per_sample_covariance_inverse():
     assert "multivariate_normal" not in source
 
 
+def test_tie_aware_elite_weights_match_rank_weights_without_ties():
+    from Cartest.planning.batched_rne_solver import _tie_aware_elite_weights
+
+    actual = _tie_aware_elite_weights(jnp.array([0.0, 1.0, 2.0, 3.0]), 2)
+    assert jnp.allclose(actual, jnp.array([0.25, 0.25, 0.0, 0.0]))
+
+
+def test_tie_aware_elite_weights_split_boundary_ties():
+    from Cartest.planning.batched_rne_solver import _tie_aware_elite_weights
+
+    actual = _tie_aware_elite_weights(jnp.array([0.0, 1.0, 1.0, 3.0]), 2)
+    assert jnp.allclose(actual, jnp.array([0.25, 0.125, 0.125, 0.0]))
+
+
+def test_tie_aware_elite_weights_split_all_equal_costs_and_preserve_mass():
+    from Cartest.planning.batched_rne_solver import _tie_aware_elite_weights
+
+    costs = jnp.array([[1.0, 1.0, 1.0, 1.0],
+                       [0.0, 2.0, 2.0, 4.0]])
+    actual = _tie_aware_elite_weights(costs, 2)
+    expected = jnp.array([[0.125, 0.125, 0.125, 0.125],
+                          [0.25, 0.125, 0.125, 0.0]])
+    assert jnp.allclose(actual, expected)
+    assert jnp.allclose(jnp.sum(actual, axis=-1), jnp.array([0.5, 0.5]))
+
+
 def test_batched_rne_exposes_reusable_solver_factory():
     from Cartest.planning import batched_rne_solver
 
@@ -168,6 +194,9 @@ if __name__ == "__main__":
     test_batched_f_hat_uses_shared_b_plus_m_trajectory_evaluations()
     test_cartest_batched_rne_solver_runs_small_problem()
     test_fast_sampling_avoids_per_sample_covariance_inverse()
+    test_tie_aware_elite_weights_match_rank_weights_without_ties()
+    test_tie_aware_elite_weights_split_boundary_ties()
+    test_tie_aware_elite_weights_split_all_equal_costs_and_preserve_mass()
     test_batched_rne_exposes_reusable_solver_factory()
     test_cartest_batched_solver_matches_generic_rne_blocks_small_problem()
     print("batched rne helper tests ok")

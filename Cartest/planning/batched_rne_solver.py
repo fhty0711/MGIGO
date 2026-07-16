@@ -31,6 +31,23 @@ def _v_to_pi(v_m):
     return jnp.concatenate([exps / sum_e, jnp.array([1.0 / sum_e])])
 
 
+def _tie_aware_elite_weights(f_hats, elite_count):
+    """Assign rank utilities while sharing the boundary mass across ties."""
+    sample_count = f_hats.shape[-1]
+    if not 0 < elite_count <= sample_count:
+        raise ValueError("elite_count must be in [1, sample_count]")
+
+    threshold = jnp.sort(f_hats, axis=-1)[..., elite_count - 1:elite_count]
+    strict = f_hats < threshold
+    tied = f_hats == threshold
+    strict_count = jnp.sum(strict, axis=-1, keepdims=True)
+    tied_count = jnp.sum(tied, axis=-1, keepdims=True)
+    remaining_slots = jnp.maximum(elite_count - strict_count, 0)
+    boundary_weight = remaining_slots / (sample_count * jnp.maximum(tied_count, 1))
+    return jnp.where(strict, 1.0 / sample_count,
+                     jnp.where(tied, boundary_weight, 0.0))
+
+
 def _sample_all_blocks(mu, S, pi_all, count, key):
     """Sample ``count`` points per block from the block GMMs.
 
@@ -123,8 +140,7 @@ def make_cartest_batched_rne_blocks_solver(
             f_hats = batched_expected_costs_for_all_agents(
                 gen, samples_B, samples_M, ctx, scenario,
                 k_inner=k_inner, obj_transform=obj_transform)              # [M_agent, B]
-            ranks = jnp.argsort(jnp.argsort(f_hats, axis=-1), axis=-1)     # [M_agent, B]
-            agent_w_hat = jnp.where(ranks < B0, 1.0 / B, 0.0)              # [M_agent, B]
+            agent_w_hat = _tie_aware_elite_weights(f_hats, B0)             # [M_agent, B]
             mean_fitness = jnp.mean(f_hats, axis=-1)                       # [M_agent]
             block_w_hat = agent_w_hat[block_to_agent_arr]                  # [N_blocks, B]
 
