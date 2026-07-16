@@ -98,7 +98,31 @@ def test_batched_f_hat_uses_b_plus_m_trajectory_evaluations(monkeypatch=None):
     assert counts["calls"] == 3
 
 
+def test_cartest_batched_rne_solver_runs_small_problem():
+    from Cartest.planning.batched_rne_solver import cartest_batched_rne_blocks_solver
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    scenario["game"] = dict(scenario["game"], T=2, B=4, B0=2, M_inner=3, K=2)
+    gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
+    states = _states(scenario)
+    ctx = build_multi_agent_context(states)
+    mu, L_inv = build_multi_agent_warmstart(gen, scenario, states, jax.random.PRNGKey(5))
+    mu = mu[:, :2]
+    L_inv = L_inv[:, :2]
+
+    result = cartest_batched_rne_blocks_solver(
+        jax.random.PRNGKey(6), gen, scenario, context=ctx,
+        initial_mu=mu, initial_L_inv=L_inv,
+    )
+
+    assert result["mu"].shape == mu.shape
+    assert result["L_inv"].shape == L_inv.shape
+    assert result["pi"].shape == (6, 2)
+    assert jnp.all(jnp.isfinite(result["mu"]))
+
+
 if __name__ == "__main__":
     test_batched_f_hat_matches_black_box_scalar_loop()
     test_batched_f_hat_uses_b_plus_m_trajectory_evaluations()
+    test_cartest_batched_rne_solver_runs_small_problem()
     print("batched rne helper tests ok")
