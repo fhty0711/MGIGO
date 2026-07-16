@@ -14,3 +14,6 @@ Cartest/output/
 # Virtual environments
 .venv
 venv/
+
+# Local isolated development worktrees
+.worktrees/
