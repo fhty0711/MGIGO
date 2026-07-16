@@ -86,7 +86,35 @@ def test_batched_agent_cost_matches_scalar_cost_for_fixed_joint_samples():
     assert jnp.allclose(batched, scalar, rtol=2e-4, atol=2e-3)
 
 
+def test_batched_nested_cost_matches_constran_scalar_specs():
+    from Cartest.planning.batched_game_eval import evaluate_joint_plan_batch, batched_nested_costs_from_plans
+    from Constraintdealer.Constran import build_multi_agent
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
+    states = _states(scenario)
+    ctx = build_multi_agent_context(states)
+    mu, _ = build_multi_agent_warmstart(gen, scenario, states, jax.random.PRNGKey(2))
+    joint = _joint_from_mu(mu)
+    joint_batch = jnp.stack([joint, joint + 0.02], axis=0)
+
+    specs = make_agent_specs(gen, scenario)
+    scalar_fns = build_multi_agent(specs, k_inner=1.0, obj_transform="standard")
+    scalar = jnp.stack([
+        jnp.stack([scalar_fns[aid](aid, sample, ctx) for aid in range(3)])
+        for sample in joint_batch
+    ], axis=0)
+
+    plans = evaluate_joint_plan_batch(gen, joint_batch, ctx, agent_count=3)
+    batched = batched_nested_costs_from_plans(plans, scenario, k_inner=1.0, obj_transform="standard")
+
+    assert batched.shape == (2, 3)
+    assert jnp.all(jnp.isfinite(batched))
+    assert jnp.allclose(batched, scalar, rtol=2e-4, atol=2e-3)
+
+
 if __name__ == "__main__":
     test_batched_plan_eval_shapes_match_three_agents()
     test_batched_agent_cost_matches_scalar_cost_for_fixed_joint_samples()
+    test_batched_nested_cost_matches_constran_scalar_specs()
     print("batched three-agent eval tests ok")

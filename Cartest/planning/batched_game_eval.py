@@ -10,6 +10,15 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jax import vmap
 
+from Constraintdealer.Constran import (
+    T_alpha,
+    sigma_k,
+    OBJ_PRESETS,
+    OBJ_TRANSFORM_STANDARD,
+    TRANSFORM_SOFT,
+    TRANSFORM_HARD,
+)
+
 
 def agent_ctx(ctx, agent_idx):
     return {
@@ -98,3 +107,138 @@ def batched_agent_costs_from_plans(plans, scenario):
         + 2.0 * jnp.sum(rear["s_ddot"] ** 2, axis=-1)
     )
     return jnp.stack([ego_cost, front_cost, rear_cost], axis=-1)
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Constraint violations + sigma-nested cost (mirrors Constran._assemble_nest)
+# ───────────────────────────────────────────────────────────────────────
+
+def _aggregate(values, mode):
+    if mode == "max":
+        return jnp.max(values, axis=-1)
+    if mode == "q95":
+        return jnp.quantile(values, 0.95, axis=-1)
+    raise ValueError(f"unsupported aggregate {mode!r}")
+
+
+def batched_constraint_violations_from_plans(plans, scenario):
+    """Per-agent raw constraint violations g[batch, T] for the three-agent game.
+
+    Matches ``Cartest.planning.costs.three_agent_track`` g_fn semantics:
+    lane/speed/acc/jerk are identical for all agents; the collision term is
+    role-differentiated (ego full-horizon both neighbours, front/rear
+    short-horizon, rear additionally guards longitudinal clearance).
+    """
+    safe_gap = float(scenario["safety"].get("safe_gap", 3.0))
+    vehicle_length = float(scenario["safety"].get("vehicle_length", 5.0))
+    v_min = float(scenario["safety"].get("v_min", 2.0))
+    v_max = float(scenario["safety"].get("v_max", 35.0))
+    acc_max = float(scenario["safety"].get("acc_max", 5.0))
+    jerk_max = float(scenario["safety"].get("jerk_max", 2.0))
+    lane_min, lane_max = scenario["road"].get("lane_bounds_d", (-1.75, 5.25))
+
+    out = []
+    for aid in range(3):
+        plan = plans[aid]
+        vehicle = plan["vehicle"]
+        lane = jnp.maximum(jnp.maximum(0.0, lane_min - plan["d"]),
+                           jnp.maximum(0.0, plan["d"] - lane_max))
+        v = vehicle[..., 2]
+        speed = jnp.maximum(jnp.maximum(0.0, v_min - v), jnp.maximum(0.0, v - v_max))
+        a_long, a_lat = vehicle[..., 4], vehicle[..., 5]
+        a_mag = jnp.sqrt(a_long ** 2 + a_lat ** 2)
+        acc = jnp.maximum(
+            jnp.maximum(0.0, jnp.abs(a_long) - acc_max),
+            jnp.maximum(jnp.maximum(0.0, jnp.abs(a_lat) - acc_max), jnp.maximum(0.0, a_mag - acc_max)),
+        )
+        j_long, j_lat = vehicle[..., 6], vehicle[..., 7]
+        j_mag = jnp.sqrt(j_long ** 2 + j_lat ** 2)
+        jerk = jnp.maximum(
+            jnp.maximum(0.0, jnp.abs(j_long) - jerk_max),
+            jnp.maximum(jnp.maximum(0.0, jnp.abs(j_lat) - jerk_max), jnp.maximum(0.0, j_mag - jerk_max)),
+        )
+
+        if aid == 0:
+            col = jnp.maximum(
+                pair_distance_violation(plan["x"], plan["y"], plans[1]["x"], plans[1]["y"], safe_gap),
+                pair_distance_violation(plan["x"], plan["y"], plans[2]["x"], plans[2]["y"], safe_gap),
+            )
+        elif aid == 1:
+            short = slice(0, 2)
+            col = jnp.zeros_like(plan["x"])
+            ego_short = pair_distance_violation(
+                plan["x"][..., short], plan["y"][..., short],
+                plans[0]["x"][..., short], plans[0]["y"][..., short], safe_gap)
+            rear_short = pair_distance_violation(
+                plan["x"][..., short], plan["y"][..., short],
+                plans[2]["x"][..., short], plans[2]["y"][..., short], safe_gap)
+            col = col.at[..., short].set(jnp.maximum(ego_short, rear_short))
+        else:
+            short = slice(0, 2)
+            col = jnp.zeros_like(plan["x"])
+            ego_short = pair_distance_violation(
+                plan["x"][..., short], plan["y"][..., short],
+                plans[0]["x"][..., short], plans[0]["y"][..., short], safe_gap)
+            col = col.at[..., short].set(ego_short)
+            clearance = vehicle_length + safe_gap
+            clearance_violation = jnp.maximum(0.0, clearance - (plans[1]["s"] - plan["s"]))
+            col = jnp.maximum(col, clearance_violation)
+
+        out.append({"lane": lane, "speed": speed, "acc": acc, "jerk": jerk, "collision": col})
+    return tuple(out)
+
+
+# Constraint layer config for three_agent_track, ordered by priority
+# (low -> high = innermost -> outermost), mirroring the Deterministic specs:
+#   lane(soft,q95) speed(soft,max) acc(soft,max) jerk(soft,max) collision(hard,max)
+# Each entry: (name, aggregate, transform_table, baseline, resolution).
+# resolution = first knot of the transform table (the mode's "分辨率").
+_THREE_AGENT_LAYERS = [
+    ("lane", "q95", TRANSFORM_SOFT, 0.5, float(TRANSFORM_SOFT[0][0])),
+    ("speed", "max", TRANSFORM_SOFT, 0.5, float(TRANSFORM_SOFT[0][0])),
+    ("acc", "max", TRANSFORM_SOFT, 0.5, float(TRANSFORM_SOFT[0][0])),
+    ("jerk", "max", TRANSFORM_SOFT, 0.5, float(TRANSFORM_SOFT[0][0])),
+    ("collision", "max", TRANSFORM_HARD, 2.0, float(TRANSFORM_HARD[0][0])),
+]
+
+
+def _obj_table(obj_transform):
+    if isinstance(obj_transform, tuple):
+        return obj_transform
+    return OBJ_PRESETS.get(obj_transform, OBJ_TRANSFORM_STANDARD)
+
+
+def batched_nested_costs_from_plans(plans, scenario, k_inner=1.0, obj_transform="standard"):
+    """Three-agent sigma-nested cost shaped [batch, 3].
+
+    This is a batched replication of ``Constran._assemble_nest``: the raw
+    objective is the innermost seed, and each constraint layer wraps it as
+    ``inner = sqrt(2) * sigma_1(inner) + Phi`` with
+    ``Phi = max(0, T_alpha(g)) + baseline * 1[max(0,g) > resolution]``.
+    Constraints are applied in priority order (innermost -> outermost) and
+    the objective uses ``sigma_k`` with ``k_inner``.
+    """
+    M = jnp.sqrt(2.0)
+    obj_knots_g, obj_knots_T = _obj_table(obj_transform)
+    n_total = len(_THREE_AGENT_LAYERS) + 1  # n constraints + objective's own sigma wrap
+
+    costs = batched_agent_costs_from_plans(plans, scenario)          # [batch, 3]
+    violations = batched_constraint_violations_from_plans(plans, scenario)
+
+    result = []
+    for aid in range(3):
+        inner = T_alpha(costs[:, aid], obj_knots_g, obj_knots_T)     # objective transform
+        inner = inner / (M ** n_total)                                # pre-scale by sqrt(2)**n_total
+        inner = sigma_k(inner, k=k_inner)                             # k only for objective
+
+        for _name, agg, table, baseline, resolution in _THREE_AGENT_LAYERS:
+            g_raw = _aggregate(violations[aid][_name], agg)          # [batch]
+            t_val = jnp.maximum(0.0, T_alpha(g_raw, table[0], table[1]))
+            Phi = t_val
+            violated = jnp.maximum(0.0, g_raw) > resolution
+            Phi = jnp.where(violated, Phi + baseline, Phi)
+            inner = M * sigma_k(inner, k=1.0) + Phi                   # constraint layer
+
+        inner = M * sigma_k(inner, k=1.0)                             # final sigma wrap
+        result.append(inner)
+    return jnp.stack(result, axis=-1)
