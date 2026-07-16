@@ -25,7 +25,8 @@ from jax import random
 from Cartest.planning.constraints import make_constraints as _make_constraints
 from Constraintdealer.Constran import Deterministic
 from Cartest.planning.costs.default_lyapunov import DEFAULT_CONSTRAINTS
-from gmm_igo.solver_builder import build_solver
+from gmm_igo.solver_builder import build_solver, build_nash_solver, NashResult, SolverResult
+from Cartest.planning.costs.registry import make_agent_specs_from_scenario
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -274,3 +275,203 @@ def map_warmstart(gen, s0: float, v0: float,
     # (M=2, K, D)
     return jnp.stack([jnp.stack(s_comp, axis=0),
                       jnp.stack(d_comp, axis=0)], axis=0)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Multi-agent Nash/RNE helpers (unified through build_nash_solver)
+# ═══════════════════════════════════════════════════════════════════════
+
+def build_multi_agent_context(states):
+    """Build JAX-friendly context keys for multi-agent Cartest game costs."""
+    ctx = {}
+    for idx, state in enumerate(states):
+        ctx[f"s0_a{idx}"] = float(state.s)
+        ctx[f"s_dot0_a{idx}"] = float(state.s_dot)
+        ctx[f"s_ddot0_a{idx}"] = float(state.s_ddot)
+        ctx[f"d0_a{idx}"] = float(state.d)
+        ctx[f"d_dot0_a{idx}"] = float(state.d_dot)
+        ctx[f"d_ddot0_a{idx}"] = float(state.d_ddot)
+    return ctx
+
+
+def build_multi_agent_warmstart(gen, scenario, states, key):
+    """Build block-wise GMM means and precision factors for a game scenario."""
+    n_free = gen.n_free
+    game = scenario["game"]
+    k_count = int(game.get("K", 3))
+    n_blocks = len(game["block_layout"])
+    speed_factors = jnp.asarray(
+        scenario.get("behavior", {}).get("speed_factors", (1.15, 1.0, 0.85))
+    )
+    if speed_factors.shape[0] != k_count:
+        speed_factors = jnp.linspace(1.15, 0.85, k_count)
+
+    mu = jnp.zeros((n_blocks, k_count, n_free), dtype=jnp.float32)
+    greville = gen.greville[2:gen.n_ctrl]
+
+    for block_idx, label in enumerate(game["block_layout"]):
+        agent_idx = int(game["block_to_agent"][block_idx])
+        state = states[agent_idx]
+        is_d_block = label.endswith("_d")
+        for comp_idx in range(k_count):
+            key, subkey = random.split(key)
+            if is_d_block:
+                values = jnp.full((n_free,), float(state.d), dtype=jnp.float32)
+            else:
+                speed = float(state.s_dot) * speed_factors[comp_idx]
+                values = float(state.s) + speed * greville
+                values = values + 0.1 * random.normal(subkey, (n_free,))
+            mu = mu.at[block_idx, comp_idx].set(values)
+
+    L_inv = jnp.tile(jnp.eye(n_free, dtype=jnp.float32), (n_blocks, k_count, 1, 1))
+    return mu, L_inv
+
+
+def build_cartest_nash_solver(gen, scenario):
+    """Build the unified Nash/RNE solver for a Cartest multi-agent scenario."""
+    game = scenario["game"]
+    dims = tuple([gen.n_free] * len(game["block_layout"]))
+    if game.get("solver") == "cartest_batched_rne_blocks":
+        return _build_cartest_batched_solver(gen, scenario, dims)
+    return build_nash_solver(
+        agent_specs=make_agent_specs_from_scenario(gen, scenario),
+        dims=dims,
+        solver=game.get("solver", "rne_blocks"),
+        block_to_agent=tuple(game["block_to_agent"]),
+        T=int(game.get("T", 300)),
+        dt=float(game.get("dt", 0.15)),
+        K=int(game.get("K", 3)),
+        B=int(game.get("B", 64)),
+        B0=int(game.get("B0", 20)),
+        T_0=int(game.get("T_0", 100)),
+        M_inner=int(game.get("M_inner", 30)),
+    )
+
+
+def _build_cartest_batched_solver(gen, scenario, dims):
+    """Build a solver callable for the Cartest batched RNE blocks mode.
+
+    This wraps ``cartest_batched_rne_blocks_solver`` (which evaluates B-spline
+    trajectories outside the ``B x M_inner`` pairing loop) and packs its raw
+    diagnostics into the same ``NashResult`` shape the generic
+    ``rne_blocks`` path returns, so ``select_nash_plan`` and the closed-loop
+    runner work unchanged.
+    """
+    from Cartest.planning.batched_rne_solver import cartest_batched_rne_blocks_solver
+    from Cartest.planning.batched_game_eval import (
+        evaluate_joint_plan_batch, batched_nested_costs_from_plans,
+    )
+
+    game = scenario["game"]
+    block_to_agent = tuple(game["block_to_agent"])
+    M_agent = len(scenario["agents"])
+    n_free = gen.n_free
+    # Match the generic build_nash_solver defaults so this is a faithful
+    # (faster) drop-in for rne_blocks on three_agent_track.
+    k_inner = 0.1
+    obj_transform = "standard"
+
+    def _solve(key, *, context=None, initial_mu=None, initial_S_or_L=None,
+               initial_pi=None, warm_start=None):
+        del initial_pi
+        mu = initial_mu
+        L_inv = initial_S_or_L
+        v = None
+        if warm_start is not None:
+            ws = warm_start if isinstance(warm_start, dict) else warm_start.__dict__
+            if mu is None:
+                mu = ws.get("mu", ws.get("initial_mu"))
+            if L_inv is None:
+                L_inv = ws.get("L_inv", ws.get("S_or_L"))
+            v = ws.get("v")
+        if mu is None or L_inv is None:
+            raise ValueError(
+                "cartest_batched_rne_blocks requires initial_mu and initial_S_or_L"
+            )
+
+        raw = cartest_batched_rne_blocks_solver(
+            key, gen, scenario, context=context,
+            initial_mu=mu, initial_L_inv=L_inv, initial_v=v,
+            k_inner=k_inner, obj_transform=obj_transform,
+        )
+
+        final_mu = raw["mu"]
+        final_L = raw["L_inv"]
+        final_pi = raw["pi"]
+
+        solutions = {}
+        joint_parts = []
+        for aid in range(M_agent):
+            my_blocks = [b for b in range(len(block_to_agent))
+                         if block_to_agent[b] == aid]
+            blk_arr = jnp.array(my_blocks)
+            mu_agent = final_mu[blk_arr]
+            L_agent = final_L[blk_arr]
+            pi_agent = final_pi[blk_arr]
+            best_k = jnp.argmax(pi_agent, axis=1)
+            x_parts = [mu_agent[j, best_k[j], :n_free] for j in range(len(my_blocks))]
+            x_agent = jnp.concatenate(x_parts) if x_parts else jnp.zeros(0)
+            joint_parts.append(x_agent)
+            solutions[aid] = SolverResult(
+                x=x_agent, cost=0.0, mu=mu_agent, S_or_L=L_agent, pi=pi_agent,
+                solver_name=f"nash_cartest_batched_rne_blocks_agent{aid}",
+            )
+        joint_x = jnp.concatenate(joint_parts)
+
+        # Real per-agent nested cost on the selected equilibrium joint_x,
+        # using the same batched cost definition as the solver internals.
+        plans = evaluate_joint_plan_batch(gen, joint_x[None], context, agent_count=M_agent)
+        per_agent_cost = batched_nested_costs_from_plans(
+            plans, scenario, k_inner=k_inner, obj_transform=obj_transform)[0]
+        for aid in range(M_agent):
+            solutions[aid] = SolverResult(
+                x=solutions[aid].x, cost=float(per_agent_cost[aid]),
+                mu=solutions[aid].mu, S_or_L=solutions[aid].S_or_L,
+                pi=solutions[aid].pi, solver_name=solutions[aid].solver_name,
+            )
+
+        return NashResult(
+            solutions=solutions,
+            joint_x=joint_x,
+            per_agent_cost=per_agent_cost,
+            solver_name="cartest_batched_rne_blocks",
+            diag={
+                "mu": final_mu,
+                "S_or_L": final_L,
+                "pi": final_pi,
+                "v": raw["v"],
+                "block_to_agent": block_to_agent,
+                "dims": dims,
+                "metrics": raw["metrics"],
+            },
+        )
+
+    return _solve
+
+
+def select_nash_plan(result, scenario):
+    """Decode block-level NashResult diagnostics into per-agent B-spline controls."""
+    game = scenario["game"]
+    mu = result.diag["mu"]
+    pi = result.diag["pi"]
+    block_to_agent = tuple(game["block_to_agent"])
+
+    plans = []
+    for agent_idx in range(len(scenario["agents"])):
+        block_indices = [i for i, owner in enumerate(block_to_agent) if owner == agent_idx]
+        if len(block_indices) != 2:
+            raise ValueError(
+                f"Agent {agent_idx} must own exactly two blocks, got {block_indices}"
+            )
+        s_block, d_block = block_indices
+        best_s = int(jnp.argmax(pi[s_block]))
+        best_d = int(jnp.argmax(pi[d_block]))
+        plans.append({
+            "agent_idx": agent_idx,
+            "ctrl_s": mu[s_block, best_s],
+            "ctrl_d": mu[d_block, best_d],
+            "best_components": (best_s, best_d),
+            "pi_s": pi[s_block],
+            "pi_d": pi[d_block],
+        })
+    return plans

@@ -296,7 +296,8 @@ def _broadcast_plan(plan, B, M_inner, use_candidate):
             for key, value in plan.items()}
 
 
-def batched_expected_cost_for_agent(gen, samples_b, samples_m, ctx, scenario, agent_idx):
+def batched_expected_cost_for_agent(gen, samples_b, samples_m, ctx, scenario, agent_idx,
+                                    k_inner=1.0, obj_transform="standard"):
     """Compute f_hat[B] for one agent from fixed block samples.
 
     samples_b: [N_blocks, B, D]       candidate (own-action) samples
@@ -322,5 +323,6 @@ def batched_expected_cost_for_agent(gen, samples_b, samples_m, ctx, scenario, ag
     broadcast = tuple(
         _broadcast_plan(plans[aid], B, M_inner, aid == agent_idx) for aid in range(3)
     )
-    costs = batched_nested_costs_from_plans(broadcast, scenario)
+    costs = batched_nested_costs_from_plans(broadcast, scenario, k_inner=k_inner,
+                                            obj_transform=obj_transform)
     return costs[:, agent_idx].reshape((B, M_inner)).mean(axis=1)

@@ -60,8 +60,14 @@ def cartest_batched_rne_blocks_solver(
     initial_mu,
     initial_L_inv,
     initial_v=None,
+    k_inner=0.1,
+    obj_transform="standard",
 ):
     """Run Cartest-specific batched RNE blocks and return dict diagnostics.
+
+    ``k_inner`` / ``obj_transform`` default to the same values the generic
+    ``build_nash_solver`` path uses (0.1 / "standard") so the batched path is
+    a faithful drop-in for ``rne_blocks`` on ``three_agent_track``.
 
     Returns keys:
       mu:       [N_blocks, K, D]
@@ -107,7 +113,8 @@ def cartest_batched_rne_blocks_solver(
 
             def agent_f_hat(agent_idx):
                 f_hat = batched_expected_cost_for_agent(
-                    gen, samples_B, samples_M, ctx, scenario, agent_idx)      # [B]
+                    gen, samples_B, samples_M, ctx, scenario, agent_idx,
+                    k_inner=k_inner, obj_transform=obj_transform)      # [B]
                 ranks = jnp.argsort(jnp.argsort(f_hat))
                 elite_weights = jnp.where(ranks < B0, 1.0 / B, 0.0)
                 return elite_weights, jnp.mean(f_hat)
