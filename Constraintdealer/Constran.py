@@ -133,7 +133,8 @@ def T_alpha(x: jnp.ndarray,
     log_knots_g = jnp.log(knots_g)
     knots_T_j = jnp.asarray(knots_T)
     log_ax = jnp.log(jnp.maximum(ax, jnp.nextafter(0.0, 1.0)))
-    i = jnp.searchsorted(log_knots_g, log_ax, side='right') - 1
+    i = jnp.searchsorted(
+        log_knots_g, log_ax, side="right", method="compare_all") - 1
     i = jnp.clip(i, 0, len(knots_g) - 2)
     x0 = log_knots_g[i]
     x1 = log_knots_g[i + 1]

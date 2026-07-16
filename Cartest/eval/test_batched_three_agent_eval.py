@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 from pathlib import Path
 import sys
 from unittest.mock import patch
@@ -43,6 +44,40 @@ def _joint_from_mu(mu):
         parts.append(mu[s_block, 0])
         parts.append(mu[d_block, 0])
     return jnp.concatenate(parts)
+
+
+def test_t_alpha_uses_exact_small_table_lookup():
+    from Constraintdealer.Constran import (
+        CONSTRAINT_KNOTS_G,
+        CONSTRAINT_KNOTS_T,
+        T_alpha,
+    )
+
+    source = inspect.getsource(T_alpha)
+    assert 'method="compare_all"' in source
+
+    values = jnp.asarray([
+        0.0,
+        -1e-12,
+        1e-12,
+        -float(CONSTRAINT_KNOTS_G[0]),
+        float(CONSTRAINT_KNOTS_G[0]),
+        -float(CONSTRAINT_KNOTS_G[-1]),
+        float(CONSTRAINT_KNOTS_G[-1]),
+        -1e6,
+        1e6,
+    ])
+    log_knots = jnp.log(CONSTRAINT_KNOTS_G)
+    log_ax = jnp.log(jnp.maximum(jnp.abs(values), jnp.nextafter(0.0, 1.0)))
+    indices = jnp.searchsorted(log_knots, log_ax, side="right", method="scan") - 1
+    indices = jnp.clip(indices, 0, len(CONSTRAINT_KNOTS_G) - 2)
+    x0, x1 = log_knots[indices], log_knots[indices + 1]
+    y0 = jnp.asarray(CONSTRAINT_KNOTS_T)[indices]
+    y1 = jnp.asarray(CONSTRAINT_KNOTS_T)[indices + 1]
+    t = jnp.maximum((log_ax - x0) / (x1 - x0 + 1e-12), 0.0)
+    expected = jnp.sign(values) * (y0 + t * (y1 - y0))
+
+    assert jnp.allclose(T_alpha(values), expected, rtol=0.0, atol=0.0)
 
 
 def test_batched_plan_eval_shapes_match_three_agents():
@@ -202,6 +237,7 @@ def test_scalar_and_batched_constraints_share_layer_metadata():
 
 
 if __name__ == "__main__":
+    test_t_alpha_uses_exact_small_table_lookup()
     test_batched_plan_eval_shapes_match_three_agents()
     test_batched_agent_cost_matches_scalar_cost_for_fixed_joint_samples()
     test_batched_nested_cost_matches_constran_scalar_specs()
