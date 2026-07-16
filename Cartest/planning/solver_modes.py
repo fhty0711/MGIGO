@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import random
@@ -365,6 +366,35 @@ def build_cartest_nash_solver(gen, scenario):
     )
 
 
+def _build_cartest_batched_postprocess(
+        gen, scenario, *, k_inner=0.1, obj_transform="standard"):
+    """Compile component selection and selected-plan cost as one device call."""
+    from Cartest.planning.batched_game_eval import (
+        batched_nested_costs_from_plans,
+        evaluate_joint_plan_batch,
+    )
+
+    agent_count = len(scenario["agents"])
+    block_count = len(scenario["game"]["block_to_agent"])
+
+    @jax.jit
+    def _postprocess(final_mu, final_pi, context):
+        best_components = jnp.argmax(final_pi, axis=1)
+        selected_blocks = final_mu[jnp.arange(block_count), best_components]
+        joint_x = selected_blocks.reshape(-1)
+        plans = evaluate_joint_plan_batch(
+            gen, joint_x[None], context, agent_count=agent_count)
+        per_agent_cost = batched_nested_costs_from_plans(
+            plans,
+            scenario,
+            k_inner=k_inner,
+            obj_transform=obj_transform,
+        )[0]
+        return selected_blocks, best_components, joint_x, per_agent_cost
+
+    return _postprocess
+
+
 def _build_cartest_batched_solver(gen, scenario, dims):
     """Build a solver callable for the Cartest batched RNE blocks mode.
 
@@ -375,10 +405,6 @@ def _build_cartest_batched_solver(gen, scenario, dims):
     runner work unchanged.
     """
     from Cartest.planning.batched_rne_solver import make_cartest_batched_rne_blocks_solver
-    from Cartest.planning.batched_game_eval import (
-        evaluate_joint_plan_batch, batched_nested_costs_from_plans,
-    )
-
     game = scenario["game"]
     block_to_agent = tuple(game["block_to_agent"])
     M_agent = len(scenario["agents"])
@@ -388,6 +414,8 @@ def _build_cartest_batched_solver(gen, scenario, dims):
     k_inner = 0.1
     obj_transform = "standard"
     batched_solver = make_cartest_batched_rne_blocks_solver(
+        gen, scenario, k_inner=k_inner, obj_transform=obj_transform)
+    postprocess = _build_cartest_batched_postprocess(
         gen, scenario, k_inner=k_inner, obj_transform=obj_transform)
 
     def _solve(key, *, context=None, initial_mu=None, initial_S_or_L=None,
@@ -409,8 +437,11 @@ def _build_cartest_batched_solver(gen, scenario, dims):
                 "cartest_batched_rne_blocks requires initial_mu and initial_S_or_L"
             )
 
+        jax_context = {} if context is None else {
+            name: jnp.asarray(value) for name, value in context.items()
+        }
         raw = batched_solver(
-            key, context=context,
+            key, context=jax_context,
             initial_mu=mu, initial_L_inv=L_inv, initial_v=v,
         )
 
@@ -418,8 +449,10 @@ def _build_cartest_batched_solver(gen, scenario, dims):
         final_L = raw["L_inv"]
         final_pi = raw["pi"]
 
+        selected_blocks, best_components, joint_x, per_agent_cost = postprocess(
+            final_mu, final_pi, jax_context)
+
         solutions = {}
-        joint_parts = []
         for aid in range(M_agent):
             my_blocks = [b for b in range(len(block_to_agent))
                          if block_to_agent[b] == aid]
@@ -427,26 +460,11 @@ def _build_cartest_batched_solver(gen, scenario, dims):
             mu_agent = final_mu[blk_arr]
             L_agent = final_L[blk_arr]
             pi_agent = final_pi[blk_arr]
-            best_k = jnp.argmax(pi_agent, axis=1)
-            x_parts = [mu_agent[j, best_k[j], :n_free] for j in range(len(my_blocks))]
-            x_agent = jnp.concatenate(x_parts) if x_parts else jnp.zeros(0)
-            joint_parts.append(x_agent)
+            x_agent = selected_blocks[blk_arr, :n_free].reshape(-1)
             solutions[aid] = SolverResult(
-                x=x_agent, cost=0.0, mu=mu_agent, S_or_L=L_agent, pi=pi_agent,
+                x=x_agent, cost=per_agent_cost[aid],
+                mu=mu_agent, S_or_L=L_agent, pi=pi_agent,
                 solver_name=f"nash_cartest_batched_rne_blocks_agent{aid}",
-            )
-        joint_x = jnp.concatenate(joint_parts)
-
-        # Real per-agent nested cost on the selected equilibrium joint_x,
-        # using the same batched cost definition as the solver internals.
-        plans = evaluate_joint_plan_batch(gen, joint_x[None], context, agent_count=M_agent)
-        per_agent_cost = batched_nested_costs_from_plans(
-            plans, scenario, k_inner=k_inner, obj_transform=obj_transform)[0]
-        for aid in range(M_agent):
-            solutions[aid] = SolverResult(
-                x=solutions[aid].x, cost=float(per_agent_cost[aid]),
-                mu=solutions[aid].mu, S_or_L=solutions[aid].S_or_L,
-                pi=solutions[aid].pi, solver_name=solutions[aid].solver_name,
             )
 
         return NashResult(
@@ -462,6 +480,8 @@ def _build_cartest_batched_solver(gen, scenario, dims):
                 "block_to_agent": block_to_agent,
                 "dims": dims,
                 "metrics": raw["metrics"],
+                "selected_blocks": selected_blocks,
+                "best_components": best_components,
             },
         )
 
@@ -473,6 +493,8 @@ def select_nash_plan(result, scenario):
     game = scenario["game"]
     mu = result.diag["mu"]
     pi = result.diag["pi"]
+    selected_blocks = result.diag.get("selected_blocks")
+    selected_components = result.diag.get("best_components")
     block_to_agent = tuple(game["block_to_agent"])
 
     plans = []
@@ -483,12 +505,20 @@ def select_nash_plan(result, scenario):
                 f"Agent {agent_idx} must own exactly two blocks, got {block_indices}"
             )
         s_block, d_block = block_indices
-        best_s = int(jnp.argmax(pi[s_block]))
-        best_d = int(jnp.argmax(pi[d_block]))
+        if selected_blocks is None or selected_components is None:
+            best_s = int(jnp.argmax(pi[s_block]))
+            best_d = int(jnp.argmax(pi[d_block]))
+            ctrl_s = mu[s_block, best_s]
+            ctrl_d = mu[d_block, best_d]
+        else:
+            best_s = selected_components[s_block]
+            best_d = selected_components[d_block]
+            ctrl_s = selected_blocks[s_block]
+            ctrl_d = selected_blocks[d_block]
         plans.append({
             "agent_idx": agent_idx,
-            "ctrl_s": mu[s_block, best_s],
-            "ctrl_d": mu[d_block, best_d],
+            "ctrl_s": ctrl_s,
+            "ctrl_d": ctrl_d,
             "best_components": (best_s, best_d),
             "pi_s": pi[s_block],
             "pi_d": pi[d_block],

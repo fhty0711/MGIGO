@@ -6,6 +6,8 @@ import copy
 import inspect
 from pathlib import Path
 import sys
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import jax
 jax.config.update("jax_default_matmul_precision", "highest")
@@ -18,7 +20,7 @@ from Cartest.core.frenet_traj import FrenetBSplineTrajectory
 from Cartest.execution.execute import FrenetState
 from Cartest.planning.scenarios import get_scenario
 from Cartest.planning.solver_modes import build_multi_agent_context, build_multi_agent_warmstart
-from Cartest.planning.solver_modes import build_cartest_nash_solver
+from Cartest.planning.solver_modes import build_cartest_nash_solver, select_nash_plan
 from Cartest.planning.costs.three_agent_track import make_agent_specs
 from Constraintdealer.Constran import build_multi_agent
 
@@ -172,6 +174,53 @@ def test_batched_rne_exposes_reusable_solver_factory():
     assert not hasattr(batched_rne_solver, "cartest_batched_rne_blocks_solver")
 
 
+def test_batched_postprocess_is_jitted_and_selects_joint_plan():
+    from Cartest.planning import solver_modes
+
+    assert hasattr(solver_modes, "_build_cartest_batched_postprocess")
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
+    states = _states(scenario)
+    ctx = build_multi_agent_context(states)
+    mu, _ = build_multi_agent_warmstart(
+        gen, scenario, states, jax.random.PRNGKey(9))
+    pi = jnp.tile(jnp.asarray([[0.1, 0.8, 0.1]]), (mu.shape[0], 1))
+
+    postprocess = solver_modes._build_cartest_batched_postprocess(gen, scenario)
+    selected, best, joint_x, costs = postprocess(mu, pi, ctx)
+
+    assert hasattr(postprocess, "lower")
+    assert selected.shape == (mu.shape[0], gen.n_free)
+    assert jnp.array_equal(best, jnp.ones((mu.shape[0],), dtype=best.dtype))
+    assert jnp.allclose(selected, mu[:, 1])
+    assert joint_x.shape == (mu.shape[0] * gen.n_free,)
+    assert costs.shape == (len(scenario["agents"]),)
+    assert jnp.all(jnp.isfinite(costs))
+
+
+def test_select_nash_plan_reuses_preselected_blocks_without_argmax():
+    selected = jnp.arange(18, dtype=jnp.float32).reshape(6, 3)
+    best = jnp.asarray([2, 1, 0, 2, 0, 1])
+    result = SimpleNamespace(diag={
+        "mu": jnp.zeros((6, 3, 3)),
+        "pi": jnp.full((6, 3), 1.0 / 3.0),
+        "selected_blocks": selected,
+        "best_components": best,
+    })
+    scenario = {
+        "agents": ({}, {}, {}),
+        "game": {"block_to_agent": (0, 0, 1, 1, 2, 2)},
+    }
+
+    with patch.object(jnp, "argmax", side_effect=AssertionError("unexpected sync")):
+        plans = select_nash_plan(result, scenario)
+
+    assert jnp.array_equal(plans[1]["ctrl_s"], selected[2])
+    assert jnp.array_equal(plans[1]["ctrl_d"], selected[3])
+    assert plans[1]["best_components"] == (best[2], best[3])
+
+
 def test_cartest_batched_solver_matches_generic_rne_blocks_small_problem():
     scenario = copy.deepcopy(get_scenario("three_agent_track"))
     scenario["game"] = dict(scenario["game"], T=2, B=4, B0=2, M_inner=2, K=2)
@@ -207,5 +256,7 @@ if __name__ == "__main__":
     test_tie_aware_elite_weights_split_all_equal_costs_and_preserve_mass()
     test_mixture_weights_do_not_reset_at_iteration_zero()
     test_batched_rne_exposes_reusable_solver_factory()
+    test_batched_postprocess_is_jitted_and_selects_joint_plan()
+    test_select_nash_plan_reuses_preselected_blocks_without_argmax()
     test_cartest_batched_solver_matches_generic_rne_blocks_small_problem()
     print("batched rne helper tests ok")
