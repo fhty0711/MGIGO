@@ -13,7 +13,7 @@ import jax, jax.numpy as jnp
 import numpy as np
 from jax import random
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from Cartest.core.frenet_traj import FrenetBSplineTrajectory
 from Cartest.core.reference_path import CircularReference
@@ -25,8 +25,8 @@ from Cartest.planning.scenarios import get_scenario, make_initial_state, build_o
 from Cartest.planning.costs.default_lyapunov import DEFAULT_CONSTRAINTS
 from gmm_igo.solver_builder import build_solver
 
-ROOT = Path(__file__).resolve().parent
-BASIS = ROOT / "basis"
+CARTEST_ROOT = Path(__file__).resolve().parents[1]
+BASIS = CARTEST_ROOT / "basis"
 
 
 def run_two_phase(R=100.0, steps=60, seed=42):

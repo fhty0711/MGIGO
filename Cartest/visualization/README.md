@@ -106,8 +106,8 @@ Run these checks after visualization changes:
   Cartest/visualization/game_renderer.py \
   Cartest/visualization/plotting.py \
   Cartest/Simple.py \
-  Cartest/visualization/test_visualization_renderer.py
-.venv/bin/python Cartest/visualization/test_visualization_renderer.py
+  Cartest/eval/test_visualization_renderer.py
+.venv/bin/python Cartest/eval/test_visualization_renderer.py
 .venv/bin/python Cartest/Simple.py curved_cruise --steps 1
 ```
 

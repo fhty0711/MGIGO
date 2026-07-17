@@ -6,7 +6,7 @@ bounded snap — the standard for autonomous driving trajectory planning.
 
 Usage::
 
-    uv run python Cartest/spline.py
+    uv run python Cartest/basis/spline.py
 """
 
 from __future__ import annotations

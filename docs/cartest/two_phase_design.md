@@ -164,7 +164,7 @@ state = execute_perfect_tracking(result_p2.x, gen, ctx)
 
 ### 3.1 两个变换的角色
 
-正反变换实现在 [core/frenet_traj.py](core/frenet_traj.py):
+正反变换实现在 [core/frenet_traj.py](../../Cartest/core/frenet_traj.py):
 
 | 变换 | 方向 | 在两阶段中的角色 |
 |------|------|-----------------|
@@ -225,7 +225,7 @@ Phase 2 Lyapunov cost 跟踪 z_ref
 
 ### 3.5 已知近似及其影响
 
-`to_vehicle_states` 中的近似 ([frenet_traj.py:132](core/frenet_traj.py#L132)):
+`to_vehicle_states` 中的近似 ([frenet_traj.py:132](../../Cartest/core/frenet_traj.py#L132)):
 
 | 近似 | 影响 |
 |------|------|
@@ -233,7 +233,7 @@ Phase 2 Lyapunov cost 跟踪 z_ref
 | 简化 jerk 旋转 (忽略 `2·κ_r·v·a_long` 离心 jerk 耦合项) | 弯道上 jerk 的车辆级投影有小误差 |
 | 运动学自行车转向模型 (忽略轮胎侧偏) | 极限工况下转向角不精确 |
 
-`_build_vehicle_reference` 中的近似 ([frenet_traj.py:321](core/frenet_traj.py#L321)):
+`_build_vehicle_reference` 中的近似 ([frenet_traj.py:321](../../Cartest/core/frenet_traj.py#L321)):
 
 | 近似 | 影响 |
 |------|------|
@@ -308,7 +308,7 @@ for k in range(K):
 **为什么不用 ramp 外推**: ramp 外推 (手工构造 d 从当前值渐变到目标) → 数值爆炸, cost 无法区分模态。
 全车道 warmstart → B-spline C0/C1 夹紧自动处理从当前 `d0` 到目标车道的过渡。
 
-参考: [warmstart.py:26](planning/warmstart.py#L26) `tangent_warmstart` 已实现 Greville 匀速外推。
+参考: [warmstart.py:26](../../Cartest/planning/warmstart.py#L26) `tangent_warmstart` 已实现 Greville 匀速外推。
 需要新增: `build_multilane_mu` — 多车道 GMM 初始化。
 
 ### 4.4 Cost 设计: 地图引导
@@ -374,7 +374,7 @@ Phase 1 (交互):
        z_ref → Phase 2
 ```
 
-MPC_G_MS.py 位置: [gmm_igo/MPC_G_MS.py](../gmm_igo/MPC_G_MS.py)。参考用例: [MultipleTest/Testgame.py](../MultipleTest/Testgame.py)。
+MPC_G_MS.py 位置: [gmm_igo/MPC_G_MS.py](../../gmm_igo/MPC_G_MS.py)。参考用例: [MultipleTest/Testgame.py](../../MultipleTest/Testgame.py)。
 
 ### 4.7 多模态淘汰机制
 
@@ -433,7 +433,7 @@ jerk ⊃ acc ⊃ speed ⊃ lane ⊃ obs
 - **jerk/acc 在最外层** (priority=1~2): 先保证物理可行
 - **障碍物在内层** (priority=5): `z_ref` 已解决几何, obs 仅作最后防线
 
-**当前状态**: [constraints.py:56](planning/constraints.py#L56) `make_constraints` 的嵌套方向固定为 obs-outer。
+**当前状态**: [constraints.py:56](../../Cartest/planning/constraints.py#L56) `make_constraints` 的嵌套方向固定为 obs-outer。
 **原型阶段**: 两个 Phase 可先用同一方向 (obs-outer)，验证两阶段架构可行后再做对照实验决定是否需要反转。
 
 ### 5.4 Solver 配置
@@ -460,7 +460,7 @@ result_p2 = modes.solve('standard', key2, ctx_p2, warm_start=result_p1)
 ```
 
 两个 Phase 使用同一套 B-spline 基 → ctrl 维度相同 → GMM 的 μ, L, π 直接兼容。
-参考: [solver_builder](gmm_igo/solver_builder.py) 的 `warm_start` 参数支持 GMM 状态继承。
+参考: [solver_builder](../../gmm_igo/solver_builder.py) 的 `warm_start` 参数支持 GMM 状态继承。
 
 ### 5.6 模态切换不发散
 
@@ -489,7 +489,7 @@ Phase 1 和 Phase 2 共用同一套 Frenet B-spline 基 — **Phase 1 的 Frenet
 
 ### 6.2 from_vehicle_states — 底层反解
 
-实现在 [frenet_traj.py:202](core/frenet_traj.py#L202), 逐层反解:
+实现在 [frenet_traj.py:202](../../Cartest/core/frenet_traj.py#L202), 逐层反解:
 
 ```
 层1 (位置):  (x, y) → ref_path.cartesian_to_frenet → (s, d)
@@ -500,7 +500,7 @@ Phase 1 和 Phase 2 共用同一套 Frenet B-spline 基 — **Phase 1 的 Frenet
 
 ### 6.3 make_frenet_reference — 高层封装
 
-实现在 [frenet_traj.py:261](core/frenet_traj.py#L261)。
+实现在 [frenet_traj.py:261](../../Cartest/core/frenet_traj.py#L261)。
 从 maneuver 描述生成 z_ref 的标准管道:
 
 ```
@@ -542,19 +542,19 @@ Frenet → to_vehicle_states → vehicle [T×9] → from_vehicle_states → Fren
 
 | 组件 | 文件 | 状态 |
 |------|------|------|
-| 正变换 `to_vehicle_states` | [frenet_traj.py:132](core/frenet_traj.py#L132) | ✅ 含曲率耦合, 用于约束检查 |
-| 反变换 `from_vehicle_states` | [frenet_traj.py:202](core/frenet_traj.py#L202) | ✅ 逐层反解, Round-trip 自洽 |
-| 参考生成 `make_frenet_reference` | [frenet_traj.py:261](core/frenet_traj.py#L261) | ✅ 支持 lane_change / cruise / external |
-| 车辆级参考构建 `_build_vehicle_reference` | [frenet_traj.py:321](core/frenet_traj.py#L321) | ✅ 含曲率修正, 解析 jerk |
-| Solver 模式预编译 `SolverModes` | [solver_modes.py](planning/solver_modes.py) | ✅ 5 个模式 (conservative~emergency) |
-| 跨阶耦合 Cost | [cost_transform.py](planning/cost_transform.py) | ✅ `make_objective_cross_order` + `template_coupling` |
-| T 变换 Cost (退化版) | [cost_transform.py:44](planning/cost_transform.py#L44) | ✅ `make_objective_transform` |
-| K 矩阵耦合 Cost (旧) | [cost.py](planning/cost.py) | ✅ α=0 解耦为默认 |
-| Warmstart (Greville + GMM 继承) | [warmstart.py](planning/warmstart.py) | ✅ `tangent_warmstart` + `mpc_warmstart` |
-| 约束构建 (固定嵌套) | [constraints.py](planning/constraints.py) | ✅ `make_constraints(gen, road, safety, config)` |
-| 场景配置 | [scenarios/](planning/scenarios) | ✅ 注册表: empty, single_offset, three_blocking, circle_track, lane_borrow_overtake, curved_cruise |
-| 单阶段 Demo | [Simple.py](Simple.py) | ✅ 单 solver, 单 cost |
-| Frenet 正反变换测试 (16 个) | [test_frenet_invert.py](eval/test_frenet_invert.py) | ✅ |
+| 正变换 `to_vehicle_states` | [frenet_traj.py:132](../../Cartest/core/frenet_traj.py#L132) | ✅ 含曲率耦合, 用于约束检查 |
+| 反变换 `from_vehicle_states` | [frenet_traj.py:202](../../Cartest/core/frenet_traj.py#L202) | ✅ 逐层反解, Round-trip 自洽 |
+| 参考生成 `make_frenet_reference` | [frenet_traj.py:261](../../Cartest/core/frenet_traj.py#L261) | ✅ 支持 lane_change / cruise / external |
+| 车辆级参考构建 `_build_vehicle_reference` | [frenet_traj.py:321](../../Cartest/core/frenet_traj.py#L321) | ✅ 含曲率修正, 解析 jerk |
+| Solver 模式预编译 `SolverModes` | [solver_modes.py](../../Cartest/planning/solver_modes.py) | ✅ 5 个模式 (conservative~emergency) |
+| 跨阶耦合 Cost | [cost_transform.py](../../Cartest/planning/cost_transform.py) | ✅ `make_objective_cross_order` + `template_coupling` |
+| T 变换 Cost (退化版) | [cost_transform.py:44](../../Cartest/planning/cost_transform.py#L44) | ✅ `make_objective_transform` |
+| K 矩阵耦合 Cost (旧) | [cost.py](../../Cartest/planning/cost.py) | ✅ α=0 解耦为默认 |
+| Warmstart (Greville + GMM 继承) | [warmstart.py](../../Cartest/planning/warmstart.py) | ✅ `tangent_warmstart` + `mpc_warmstart` |
+| 约束构建 (固定嵌套) | [constraints.py](../../Cartest/planning/constraints.py) | ✅ `make_constraints(gen, road, safety, config)` |
+| 场景配置 | [scenarios/](../../Cartest/planning/scenarios) | ✅ 注册表: empty, single_offset, three_blocking, circle_track, lane_borrow_overtake, curved_cruise |
+| 单阶段 Demo | [Simple.py](../../Cartest/Simple.py) | ✅ 单 solver, 单 cost |
+| Frenet 正反变换测试 (16 个) | [test_frenet_invert.py](../../Cartest/eval/test_frenet_invert.py) | ✅ |
 
 ### 7.2 待实现
 
@@ -565,7 +565,7 @@ Frenet → to_vehicle_states → vehicle [T×9] → from_vehicle_states → Fren
 | 3 | 多车道 warmstart (`build_multilane_mu`) | `warmstart.py` 扩展 | 无 |
 | 4 | 两阶段 MPC 步编排 (同基直接传递 z_ref) | 新文件 `Simple_two_phase.py` | #1, #2, #3 完成后 |
 | 5 | Phase 1 + MPC_G_MS.py 集成 (交互博弈场景) | `Simple_two_phase.py` 或新文件 | #4 完成后 |
-| 6 | `carreadme.md` 框架图更新 | `carreadme.md` | #4 验证后 |
+| 6 | `overview.md` 框架图更新 | `docs/cartest/overview.md` | #4 验证后 |
 
 ### 7.3 详细改动说明
 
@@ -818,7 +818,7 @@ Step 6 结束 → 决策质量是否满足需求?
 
 ### B. 误差空间线性变换摘要
 
-当前 framework 提供两种耦合方案 ([cost_transform.py](planning/cost_transform.py)):
+当前 framework 提供两种耦合方案 ([cost_transform.py](../../Cartest/planning/cost_transform.py)):
 
 #### B.1 T ∈ GL(2) 同阶耦合
 
@@ -865,18 +865,18 @@ T = [[1,  α],
 
 | 文件 | 角色 |
 |------|------|
-| [core/frenet_traj.py](core/frenet_traj.py) | B-spline 轨迹评估, 正反变换, 参考生成 |
-| [core/reference_path.py](core/reference_path.py) | 参考线 (StraightReference, CircularReference) |
-| [core/vehicle_model.py](core/vehicle_model.py) | PointMassModel (摩擦圆积分) |
-| [planning/cost.py](planning/cost.py) | 旧 Lyapunov cost (K 矩阵耦合) |
-| [planning/cost_transform.py](planning/cost_transform.py) | 新 Lyapunov cost (T 变换 + 跨阶耦合) |
-| [planning/constraints.py](planning/constraints.py) | 约束构建 (obs/lane/speed/acc/jerk) |
-| [planning/solver_modes.py](planning/solver_modes.py) | 5 个预编译 solver 模式 |
-| [planning/warmstart.py](planning/warmstart.py) | Greville warmstart + GMM 继承 |
-| [planning/scenarios/](planning/scenarios) | 场景注册表 |
-| [execution/execute.py](execution/execute.py) | FrenetState, execute_perfect_tracking |
-| [eval/test_frenet_invert.py](eval/test_frenet_invert.py) | 正反变换 16 个测试 |
-| [Simple.py](Simple.py) | 单阶段 MPC demo |
+| [core/frenet_traj.py](../../Cartest/core/frenet_traj.py) | B-spline 轨迹评估, 正反变换, 参考生成 |
+| [core/reference_path.py](../../Cartest/core/reference_path.py) | 参考线 (StraightReference, CircularReference) |
+| [core/vehicle_model.py](../../Cartest/core/vehicle_model.py) | PointMassModel (摩擦圆积分) |
+| [planning/cost.py](../../Cartest/planning/cost.py) | 旧 Lyapunov cost (K 矩阵耦合) |
+| [planning/cost_transform.py](../../Cartest/planning/cost_transform.py) | 新 Lyapunov cost (T 变换 + 跨阶耦合) |
+| [planning/constraints.py](../../Cartest/planning/constraints.py) | 约束构建 (obs/lane/speed/acc/jerk) |
+| [planning/solver_modes.py](../../Cartest/planning/solver_modes.py) | 5 个预编译 solver 模式 |
+| [planning/warmstart.py](../../Cartest/planning/warmstart.py) | Greville warmstart + GMM 继承 |
+| [planning/scenarios/](../../Cartest/planning/scenarios) | 场景注册表 |
+| [execution/execute.py](../../Cartest/execution/execute.py) | FrenetState, execute_perfect_tracking |
+| [eval/test_frenet_invert.py](../../Cartest/eval/test_frenet_invert.py) | 正反变换 16 个测试 |
+| [Simple.py](../../Cartest/Simple.py) | 单阶段 MPC demo |
 
 ---
 
@@ -1030,8 +1030,8 @@ def decode_joint_to_per_agent(joint_x_flat, block_to_agent_idx, dims, n_free):
     return ctrls
 ```
 
-参考: [MPC_G_MS.py:184](../gmm_igo/MPC_G_MS.py#L184) `mmog_igo_rne_blocks_solver`。
-参考用例: [Trackgame.py](../MultipleTest/Trackgame.py) ego 的 2-block 设计 (acc + steer)。
+参考: [MPC_G_MS.py:184](../../gmm_igo/MPC_G_MS.py#L184) `mmog_igo_rne_blocks_solver`。
+参考用例: [Trackgame.py](../../MultipleTest/Trackgame.py) ego 的 2-block 设计 (acc + steer)。
 
 ### 10.5 Cost 构造
 
@@ -1245,7 +1245,7 @@ violation = jnp.where(in_zone, jnp.maximum(0.0, safe - dist), 0.0)
 
 #### 升级选项: Chance/Robust 约束
 
-Constran 已支持非确定性约束类型（[Constran.py](../Constraintdealer/Constran.py)），
+Constran 已支持非确定性约束类型（[Constran.py](../../Constraintdealer/Constran.py)），
 可直接替换 `Deterministic` 包装应对外部不确定性：
 
 | 类型 | 用法 | 适用场景 |
@@ -1409,7 +1409,7 @@ def build_roundabout_warmstart(gen, agent_states, K=3):
 GMM 采样在 Frenet ctrl 空间中进行。`gen.evaluate()` 和 `gen.to_vehicle_states()` 自动处理
 κ_r ≠ 0 的曲率耦合。warmstart 不需要知道曲率 — 它只是给 GMM 一个合理的初始搜索区域。
 
-参考: [warmstart.py:26](planning/warmstart.py#L26) `tangent_warmstart`。
+参考: [warmstart.py:26](../../Cartest/planning/warmstart.py#L26) `tangent_warmstart`。
 
 ### 10.8 环岛暴露的边界条件
 
@@ -1446,12 +1446,12 @@ Cartesian 距离用于 `compute_summary` 的诊断输出。
 
 | 组件 | 文件 | 状态 |
 |------|------|------|
-| MPC_G_MS Blocks 求解器 | [gmm_igo/MPC_G_MS.py](../gmm_igo/MPC_G_MS.py) | ✅ `mmog_igo_rne_blocks_solver` |
-| 3-Agent 参考实现 (Trackgame) | [MultipleTest/Trackgame.py](../MultipleTest/Trackgame.py) | ✅ ego 2-block + 其他 1-block |
-| Frenet B-spline 基 | [Cartest/core/frenet_traj.py](core/frenet_traj.py) | ✅ evaluate, to_vehicle_states |
-| Constran per-agent build | [Constraintdealer/Constran.py](../Constraintdealer/Constran.py) | ✅ `build_multi_agent` |
-| Constran 约束 (lane/speed/acc/jerk) | [Cartest/planning/constraints.py](planning/constraints.py) | ✅ `make_constraints` |
-| StraightReference | [Cartest/core/reference_path.py](core/reference_path.py) | ✅ |
+| MPC_G_MS Blocks 求解器 | [gmm_igo/MPC_G_MS.py](../../gmm_igo/MPC_G_MS.py) | ✅ `mmog_igo_rne_blocks_solver` |
+| 3-Agent 参考实现 (Trackgame) | [MultipleTest/Trackgame.py](../../MultipleTest/Trackgame.py) | ✅ ego 2-block + 其他 1-block |
+| Frenet B-spline 基 | [Cartest/core/frenet_traj.py](../../Cartest/core/frenet_traj.py) | ✅ evaluate, to_vehicle_states |
+| Constran per-agent build | [Constraintdealer/Constran.py](../../Constraintdealer/Constran.py) | ✅ `build_multi_agent` |
+| Constran 约束 (lane/speed/acc/jerk) | [Cartest/planning/constraints.py](../../Cartest/planning/constraints.py) | ✅ `make_constraints` |
+| StraightReference | [Cartest/core/reference_path.py](../../Cartest/core/reference_path.py) | ✅ |
 
 #### 待实现
 
@@ -1526,11 +1526,10 @@ assert max(|d_out|) < 1e-6
 
 **加什么**: κ_r ≠ 0 的 B-spline + IGO + Constran
 
-**操作**: 复制 `Simple.py`→`Simple_circle.py`，只改一行:
-```python
-ref_path = CircularReference(20.0, 0.0, 0.0)  # 替 StraightReference()
+**操作**: 通过统一入口运行圆轨迹场景:
+```bash
+python Cartest/Simple.py circle_track --steps 50 --no-plot
 ```
-跑 `--steps 50 --no-plot`。
 
 **通过标准**:
 1. 不崩溃（无 NaN/Inf）
@@ -1659,7 +1658,7 @@ Agent 1: d0=0, 目标 d=0,  s0=100, 方向 −s
 ## 11. 实验验证记录
 
 > 记录了从 Level 0 到 Level 2 的逐步验证过程和关键发现。
-> 对应脚本: `Simple_circle.py`, `Simple_circle_two_phase.py`, `Simple_game_2a.py`, `Simple_game_2b.py`。
+> 对应入口: `Cartest/Simple.py circle_track`, `Cartest/demos/circle_two_phase.py`, `Cartest/Simple.py game_2a_basic`, `Cartest/Simple.py game_2b_constran`。
 
 ### 11.1 Level 0: 组件独立验证
 
@@ -1676,7 +1675,7 @@ Agent 1: d0=0, 目标 d=0,  s0=100, 方向 −s
 
 #### 0b — 单 Agent 在 CircularReference 上跑通
 
-**文件**: `Simple_circle.py` (复制 `Simple.py`, 改 1 行 import)
+**文件**: `Cartest/Simple.py` + `planning/scenarios/circle_track.py`
 
 **关键发现**:
 
@@ -1694,7 +1693,7 @@ Agent 1: d0=0, 目标 d=0,  s0=100, 方向 −s
 
 #### 1a — 单 Agent, CircularReference, Phase1+2
 
-**文件**: `Simple_circle_two_phase.py` (新增 140 行), `cost.py` (增加 ctx z_ref 支持)
+**文件**: `Cartest/demos/circle_two_phase.py`, `cost.py` (增加 ctx z_ref 支持)
 
 **初始问题**: Phase 1 松约束 (acc=8.0) → v_up = sqrt(8R) 仍超 Phase 2 紧约束 → Phase 2 跟踪时 a_lat 违规。
 

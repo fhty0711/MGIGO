@@ -43,7 +43,7 @@ IGO 黑箱优化 + Constran 约束引擎。
                         └──────────────────┘
 ```
 
-> **注意**: 上图是当前已实现的**单阶段**管线。两阶段优化架构（Phase 1 探索 + Phase 2 精炼, 以及正反变换在其中的角色）的设计文档见 **[two_phase_design.md](two_phase_design.md)**。两阶段代码尚未实现。
+> **注意**: 上图是当前已实现的**单阶段**管线。两阶段优化架构（Phase 1 探索 + Phase 2 精炼, 以及正反变换在其中的角色）的设计文档见 **[two_phase_design.md](two_phase_design.md)**。
 
 **核心管线**：
 - **正变换** `to_vehicle_states`: Frenet (s,d) → 车辆状态 (x,y,v,ψ,a_long,a_lat,…)，含曲率耦合
@@ -56,7 +56,6 @@ IGO 黑箱优化 + Constran 约束引擎。
 ```
 Cartest/
 ├── Simple.py                    # MPC demo 主程序
-├── carreadme.md
 ├── basis/                       # 离线预计算
 │   ├── spline.py                # → bspline_basis.npz
 │   └── bspline_basis.npz        # (10控点, 5次, 10s时域)
@@ -69,17 +68,21 @@ Cartest/
 ├── planning/                    # MPC 规划
 │   ├── cost.py                  # 2阶耦合 Lyapunov + build_context
 │   ├── constraints.py           # 约束构建 (obs/lane/speed/acc/jerk)
+│   ├── solver_modes.py          # 单车/多车求解器调度
 │   ├── warmstart.py             # build_initial_mu
 │   ├── scenarios/               # 场景注册表 (get_scenario, build_obstacle_predictions)
-│   └── costs/                   # cost factory 注册表 (make_objective_from_scenario)
+│   ├── costs/                   # cost factory + 三车 batched cost
+│   └── solvers/                 # Cartest 专用 solver 适配器
 ├── execution/                   # 执行
 │   └── execute.py               # execute_perfect_tracking / execute_point_mass
-└── eval/                        # 评估 + 测试
-    ├── diagnostics.py           # raw obj, g 值诊断
-    ├── reporting.py             # StepReport 记录
-    ├── plotting.py              # 可视化
-    ├── eval_closed_loop.py      # 闭环评估 (收敛/超调/震荡/约束)
-    └── test_frenet_invert.py    # 16 个测试
+├── visualization/               # 统一绘图和视频输出
+├── eval/                        # 评估 + 测试
+│   ├── diagnostics.py           # raw obj, g 值诊断
+│   ├── reporting.py             # StepReport 记录
+│   ├── eval_closed_loop.py      # 闭环评估 (收敛/超调/震荡/约束)
+│   └── test_*.py                # 单元/一致性/可视化测试
+└── demos/                       # 独立实验脚本
+    └── circle_two_phase.py
 ```
 
 ## 1. 地图 — ReferencePath
@@ -495,7 +498,7 @@ ctrl_s, ctrl_d = result.x[:gen.n_free], result.x[gen.n_free:]
 
 ### 两阶段分步优化
 
-> **状态**: 以下为设计方案，**代码尚未实现**。详细设计、实现计划与验证路径见 **[two_phase_design.md](two_phase_design.md)**。
+> **状态**: 以下为设计方案。详细设计、实现计划与验证路径见 **[two_phase_design.md](two_phase_design.md)**。
 
 完整规划问题（全局路径 + 精细跟踪 + 物理约束）很难在单个 IGO 中一次求解。
 方案是用**同一套 B-spline 基**拆成两个阶段，通过 `solver_modes` 切换求解器配置。

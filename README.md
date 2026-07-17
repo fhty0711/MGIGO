@@ -340,12 +340,13 @@ scenario-tree reduction.
 
 | File | Description |
 |------|-------------|
-| [bsplinetraj.py](Cartest/bsplinetraj.py) | BSpline trajectory generator with offline precomputed basis matrices. Position/velocity/acceleration evaluation |
-| [bsplinetrajwith1.py](Cartest/bsplinetrajwith1.py) | Extended generator with variable time parametrization (learnable time weights via softmax) |
-| [spline.py](Cartest/spline.py) | Offline B-spline basis precomputation (SciPy `BSpline`). Outputs `bspline_basis.npz` |
-| [Simple.py](Cartest/Simple.py) | Minimal warm-start demo with MPCsolverM22 |
-| [Simple1.py](Cartest/Simple1.py) | Extended trajectory optimization: variable time, lane shifting, multi-block (x, y, θ) |
-| [splinetraj.md](Cartest/splinetraj.md) | Architecture notes: multi-block solver for (x, y, time) trajectory variables |
+| [Simple.py](Cartest/Simple.py) | Unified Cartest runner for single-agent MPC and multi-agent game scenarios |
+| [core/frenet_traj.py](Cartest/core/frenet_traj.py) | Frenet B-spline trajectory evaluation and vehicle-state conversion |
+| [planning/scenarios/](Cartest/planning/scenarios/) | Scenario registry, including single-agent scenes and three-agent track games |
+| [planning/costs/](Cartest/planning/costs/) | Cost registry, scalar game costs, and batched three-agent cost evaluator |
+| [planning/solvers/](Cartest/planning/solvers/) | Cartest-local solver adapters such as batched RNE blocks |
+| [visualization/](Cartest/visualization/) | Shared rendering and ffmpeg video output helpers |
+| [docs/cartest/](docs/cartest/) | Cartest architecture, three-agent cost, and acceleration notes |
 
 ### 6.4 Autonomous Intersection Crossing — [Crossingroad/](Crossingroad/)
 
@@ -568,11 +569,14 @@ gmm_igo/
 │   └── cma-esversion.py                  # CMA-ES comparison
 │
 ├── Cartest/                              # B-spline trajectory planning
-│   ├── bsplinetraj.py                    # BSpline trajectory generator
-│   ├── bsplinetrajwith1.py               # Variable-time extension
-│   ├── spline.py                         # Basis precomputation
-│   ├── Simple.py / Simple1.py            # Demos
-│   └── bspline_basis.npz                 # Precomputed basis
+│   ├── Simple.py                         # Unified runner
+│   ├── basis/                            # B-spline basis precomputation/output
+│   ├── core/                             # Frenet trajectory + vehicle model
+│   ├── planning/                         # scenarios, costs, solvers, warmstart
+│   ├── execution/                        # closed-loop state execution helpers
+│   ├── visualization/                    # shared plotting/video code
+│   ├── eval/                             # tests and diagnostics
+│   └── demos/                            # standalone experiments
 │
 ├── Crossingroad/                         # Autonomous intersection crossing
 │   ├── main.py                           # Entry point
