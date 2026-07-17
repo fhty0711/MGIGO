@@ -123,21 +123,19 @@ def test_three_agent_track_uses_constran_constraints_and_valid_scene():
         assert scenario["safety"]["v_min"] <= agent["s_dot"] <= scenario["safety"]["v_max"]
 
     for _aid, (_objective, constraints) in specs.items():
-        assert len(constraints) == 5
+        assert len(constraints) == 4
         assert [(c.mode, c.priority, c.aggregate) for c in constraints] == [
-            ("soft", 1, "q95"),
-            ("soft", 2, "max"),
-            ("soft", 3, "max"),
-            ("soft", 4, "max"),
+            ("hard", 3, "max"),
+            ("hard", 4, "max"),
             ("hard", 5, "max"),
+            ("hard", 6, "max"),
         ]
 
     joint_x = _joint_zero(gen, scenario)
     ctx = _ctx_from_agents(scenario)
     for _aid, (_objective, constraints) in specs.items():
-        lane_values = constraints[0].g_fn(joint_x, ctx)
-        assert lane_values.shape == (gen.T,)
-        assert jnp.all(jnp.isfinite(lane_values))
+        safety_values = constraints[-1].g_fn(joint_x, ctx)
+        assert jnp.all(jnp.isfinite(safety_values))
 
 
 def test_three_agent_track_cost_prepares_joint_plans_once_per_agent_cost():
@@ -292,3 +290,40 @@ def test_cartest_nash_solver_helpers_match_scenario_shapes():
     assert plans[0]["ctrl_d"].shape == (gen.n_free,)
     assert plans[1]["ctrl_s"].shape == (gen.n_free,)
     assert plans[1]["ctrl_d"].shape == (gen.n_free,)
+
+
+def _states(scenario):
+    return [
+        FrenetState(
+            s=agent["s"], s_dot=agent["s_dot"], s_ddot=agent.get("s_ddot", 0.0),
+            d=agent["d"], d_dot=agent.get("d_dot", 0.0), d_ddot=agent.get("d_ddot", 0.0),
+            psi=agent.get("psi", 0.0),
+        )
+        for agent in scenario["agents"]
+    ]
+
+
+def test_three_agent_track_constraint_layers_are_reduced_and_ordered():
+    from Cartest.planning.costs.three_agent_track import three_agent_batched_layers
+
+    layers = three_agent_batched_layers()
+    names = tuple(layer[0] for layer in layers)
+    assert names == ("speed", "kinematics", "forward", "safety_envelope")
+
+
+def test_three_agent_track_specs_return_finite_component_costs():
+    scenario = get_scenario("three_agent_track")
+    gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
+    states = _states(scenario)
+    ctx = build_multi_agent_context(states)
+    mu, _ = build_multi_agent_warmstart(gen, scenario, states, jax.random.PRNGKey(1))
+    joint_x = mu[:, 0].reshape(-1)
+    specs = make_agent_specs_from_scenario(gen, scenario)
+    for aid, (obj, constraints) in specs.items():
+        value = obj(joint_x, ctx)
+        assert jnp.isfinite(value), f"objective agent {aid} not finite"
+        prepared = getattr(obj, "_constran_prepare", lambda x, c: None)(joint_x, ctx)
+        cctx = (ctx, prepared) if prepared is not None else ctx
+        for constraint in constraints:
+            g = constraint.g_fn(joint_x, cctx)
+            assert jnp.all(jnp.isfinite(g)), f"constraint agent {aid} not finite"
