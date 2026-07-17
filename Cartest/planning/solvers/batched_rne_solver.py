@@ -3,7 +3,7 @@
 Mirrors the block-level IGO update math of ``gmm_igo.MPC_G_MS`` (same
 sampling, elite weighting, and geometric component update) but replaces the
 black-box scalar fitness loop with the structured three-agent B-spline batch
-evaluator in ``Cartest.planning.batched_game_eval``.  Expensive trajectory
+evaluator in ``Cartest.planning.costs.three_agent_track_batched``.  Expensive trajectory
 evaluation is performed O(B + M_inner) times per iteration instead of
 O(B * M_inner), and the pairwise game costs are computed by broadcasting
 cached ego/front/rear plans.
@@ -18,10 +18,9 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 from jax import random, lax, vmap
-from jax.scipy.linalg import solve_triangular
 
 from gmm_igo.MPC_G_MS import _update_block_component_core
-from Cartest.planning.batched_game_eval import batched_expected_costs_for_all_agents
+from Cartest.planning.costs.three_agent_track_batched import batched_expected_costs_for_all_agents
 
 
 def _v_to_pi(v_m):
@@ -72,22 +71,6 @@ def _sample_all_blocks(mu, S, pi_all, count, key):
             return random.multivariate_normal(s_key, mu[b_idx, c_idx], cov)
 
         return vmap(gen_sample)(comps, random.split(b_key, count))
-
-    return vmap(sample_single_block)(jnp.arange(N_blocks), random.split(key, N_blocks))
-
-
-def _sample_all_blocks_fast(mu, S, pi_all, count, key):
-    """Faster precision sampler with different PRNG stream than ``MPC_G_MS``."""
-    N_blocks = mu.shape[0]
-    K = mu.shape[1]
-
-    def sample_single_block(b_idx, b_key):
-        key_choice, key_noise = random.split(b_key)
-        comps = random.choice(key_choice, K, p=pi_all[b_idx], shape=(count,))
-        z = random.normal(key_noise, shape=(count, S.shape[-1]))
-        L = jnp.linalg.cholesky(S[b_idx] + jnp.eye(S.shape[-1]) * 1e-7)
-        eps_all = vmap(lambda L_k: solve_triangular(L_k, z.T, lower=True, trans="T").T)(L)
-        return mu[b_idx, comps] + eps_all[comps, jnp.arange(count)]
 
     return vmap(sample_single_block)(jnp.arange(N_blocks), random.split(key, N_blocks))
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import inspect
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -51,7 +50,7 @@ def _make_samples(gen, scenario):
 
 
 def test_batched_f_hat_matches_black_box_scalar_loop():
-    from Cartest.planning.batched_game_eval import batched_expected_costs_for_all_agents
+    from Cartest.planning.costs.three_agent_track_batched import batched_expected_costs_for_all_agents
 
     scenario = copy.deepcopy(get_scenario("three_agent_track"))
     gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
@@ -79,8 +78,47 @@ def test_batched_f_hat_matches_black_box_scalar_loop():
     assert jnp.allclose(actual, expected, rtol=2e-4, atol=2e-3)
 
 
+def test_batched_f_hat_matches_scalar_loop_with_bridged_jerk_context():
+    from Cartest.planning.costs.three_agent_track_batched import batched_expected_costs_for_all_agents
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
+    ctx = build_multi_agent_context(_states(scenario))
+    ctx.update({
+        "a_long_prev_a0": 3.5,
+        "a_lat_prev_a0": -1.5,
+        "a_long_prev_a1": -2.5,
+        "a_lat_prev_a1": 1.25,
+        "a_long_prev_a2": 4.0,
+        "a_lat_prev_a2": -0.75,
+    })
+    samples_b, samples_m = _make_samples(gen, scenario)
+
+    specs = make_agent_specs(gen, scenario)
+    scalar_fns = build_multi_agent(specs, k_inner=1.0, obj_transform="standard")
+
+    expected_by_agent = []
+    for aid in range(3):
+        block_mask = jnp.asarray(scenario["game"]["block_to_agent"]) == aid
+        expected = []
+        for b in range(samples_b.shape[1]):
+            vals = []
+            for m in range(samples_m.shape[1]):
+                joint = jnp.where(
+                    block_mask[:, None], samples_b[:, b, :], samples_m[:, m, :]
+                ).reshape(-1)
+                vals.append(scalar_fns[aid](aid, joint, ctx))
+            expected.append(jnp.mean(jnp.stack(vals)))
+        expected_by_agent.append(jnp.stack(expected))
+
+    expected = jnp.stack(expected_by_agent)
+    actual = batched_expected_costs_for_all_agents(gen, samples_b, samples_m, ctx, scenario)
+    assert actual.shape == expected.shape
+    assert jnp.allclose(actual, expected, rtol=2e-4, atol=2e-3)
+
+
 def test_batched_f_hat_uses_shared_b_plus_m_trajectory_evaluations(monkeypatch=None):
-    from Cartest.planning import batched_game_eval
+    from Cartest.planning.costs import three_agent_track_batched as batched_game_eval
 
     scenario = copy.deepcopy(get_scenario("three_agent_track"))
     gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
@@ -105,7 +143,7 @@ def test_batched_f_hat_uses_shared_b_plus_m_trajectory_evaluations(monkeypatch=N
 
 
 def test_cartest_batched_rne_solver_runs_small_problem():
-    from Cartest.planning.batched_rne_solver import make_cartest_batched_rne_blocks_solver
+    from Cartest.planning.solvers.batched_rne_solver import make_cartest_batched_rne_blocks_solver
 
     scenario = copy.deepcopy(get_scenario("three_agent_track"))
     scenario["game"] = dict(scenario["game"], T=2, B=4, B0=2, M_inner=3, K=2)
@@ -125,30 +163,22 @@ def test_cartest_batched_rne_solver_runs_small_problem():
     assert jnp.all(jnp.isfinite(result["mu"]))
 
 
-def test_fast_sampling_avoids_per_sample_covariance_inverse():
-    from Cartest.planning import batched_rne_solver
-
-    source = inspect.getsource(batched_rne_solver._sample_all_blocks_fast)
-    assert "jnp.linalg.inv" not in source
-    assert "multivariate_normal" not in source
-
-
 def test_tie_aware_elite_weights_match_rank_weights_without_ties():
-    from Cartest.planning.batched_rne_solver import _tie_aware_elite_weights
+    from Cartest.planning.solvers.batched_rne_solver import _tie_aware_elite_weights
 
     actual = _tie_aware_elite_weights(jnp.array([0.0, 1.0, 2.0, 3.0]), 2)
     assert jnp.allclose(actual, jnp.array([0.25, 0.25, 0.0, 0.0]))
 
 
 def test_tie_aware_elite_weights_split_boundary_ties():
-    from Cartest.planning.batched_rne_solver import _tie_aware_elite_weights
+    from Cartest.planning.solvers.batched_rne_solver import _tie_aware_elite_weights
 
     actual = _tie_aware_elite_weights(jnp.array([0.0, 1.0, 1.0, 3.0]), 2)
     assert jnp.allclose(actual, jnp.array([0.25, 0.125, 0.125, 0.0]))
 
 
 def test_tie_aware_elite_weights_split_all_equal_costs_and_preserve_mass():
-    from Cartest.planning.batched_rne_solver import _tie_aware_elite_weights
+    from Cartest.planning.solvers.batched_rne_solver import _tie_aware_elite_weights
 
     costs = jnp.array([[1.0, 1.0, 1.0, 1.0],
                        [0.0, 2.0, 2.0, 4.0]])
@@ -160,7 +190,7 @@ def test_tie_aware_elite_weights_split_all_equal_costs_and_preserve_mass():
 
 
 def test_mixture_weights_do_not_reset_at_iteration_zero():
-    from Cartest.planning.batched_rne_solver import _should_reset_mixture_weights
+    from Cartest.planning.solvers.batched_rne_solver import _should_reset_mixture_weights
 
     assert not bool(_should_reset_mixture_weights(0, 3))
     assert not bool(_should_reset_mixture_weights(2, 3))
@@ -168,7 +198,7 @@ def test_mixture_weights_do_not_reset_at_iteration_zero():
 
 
 def test_batched_rne_exposes_reusable_solver_factory():
-    from Cartest.planning import batched_rne_solver
+    from Cartest.planning.solvers import batched_rne_solver
 
     assert hasattr(batched_rne_solver, "make_cartest_batched_rne_blocks_solver")
     assert not hasattr(batched_rne_solver, "cartest_batched_rne_blocks_solver")
@@ -248,9 +278,9 @@ def test_cartest_batched_solver_matches_generic_rne_blocks_small_problem():
 
 if __name__ == "__main__":
     test_batched_f_hat_matches_black_box_scalar_loop()
+    test_batched_f_hat_matches_scalar_loop_with_bridged_jerk_context()
     test_batched_f_hat_uses_shared_b_plus_m_trajectory_evaluations()
     test_cartest_batched_rne_solver_runs_small_problem()
-    test_fast_sampling_avoids_per_sample_covariance_inverse()
     test_tie_aware_elite_weights_match_rank_weights_without_ties()
     test_tie_aware_elite_weights_split_boundary_ties()
     test_tie_aware_elite_weights_split_all_equal_costs_and_preserve_mass()

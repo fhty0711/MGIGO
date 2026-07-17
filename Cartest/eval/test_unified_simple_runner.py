@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 from datetime import datetime
+import inspect
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -87,6 +88,29 @@ def test_simple_module_exposes_single_and_game_runners():
     assert callable(simple.run_multi_agent_game)
     assert callable(simple.block_until_ready)
     assert callable(simple.run)
+    assert "include_compile_time" in inspect.signature(simple.run).parameters
+    assert "include_compile_time" in inspect.signature(simple.run_multi_agent_game).parameters
+
+
+def test_simple_runner_enables_high_precision_jax_matmul():
+    import jax
+    import Cartest.Simple  # noqa: F401
+
+    assert jax.config.jax_default_matmul_precision == "highest"
+
+
+def test_simple_parser_supports_compile_time_timing_flag():
+    import Cartest.Simple as simple
+
+    original_argv = sys.argv
+    try:
+        sys.argv = ["Simple.py", "three_agent_track", "--no-plot", "--include-compile-time"]
+        args = simple._parse()
+    finally:
+        sys.argv = original_argv
+
+    assert args.include_compile_time is True
+    assert args.no_plot is True
 
 
 def test_simple_runner_uses_scenario_default_steps():
@@ -116,12 +140,12 @@ def test_three_agent_track_executes_third_plan_sample():
     assert scenario["game"]["execute_index"] == 3
 
 
-def test_three_agent_track_uses_validated_realtime_iteration_budget():
+def test_three_agent_track_uses_full_iteration_budget():
     from Cartest.planning.scenarios import get_scenario
 
     scenario = get_scenario("three_agent_track")
 
-    assert scenario["game"]["T"] == 100
+    assert scenario["game"]["T"] == 300
 
 
 def test_three_agent_track_initial_spacing_is_safe():
@@ -140,9 +164,11 @@ if __name__ == "__main__":
     test_game_renderer_smoke()
     test_game_renderer_limits_include_all_current_agents()
     test_simple_module_exposes_single_and_game_runners()
+    test_simple_runner_enables_high_precision_jax_matmul()
+    test_simple_parser_supports_compile_time_timing_flag()
     test_simple_runner_uses_scenario_default_steps()
     test_simple_runner_builds_timestamped_output_video_path()
     test_three_agent_track_executes_third_plan_sample()
-    test_three_agent_track_uses_validated_realtime_iteration_budget()
+    test_three_agent_track_uses_full_iteration_budget()
     test_three_agent_track_initial_spacing_is_safe()
     print("unified runner scenario tests ok")

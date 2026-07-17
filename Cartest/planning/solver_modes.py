@@ -369,13 +369,14 @@ def build_cartest_nash_solver(gen, scenario):
 def _build_cartest_batched_postprocess(
         gen, scenario, *, k_inner=0.1, obj_transform="standard"):
     """Compile component selection and selected-plan cost as one device call."""
-    from Cartest.planning.batched_game_eval import (
+    from Cartest.planning.costs.three_agent_track_batched import (
         batched_nested_costs_from_plans,
         evaluate_joint_plan_batch,
     )
 
     agent_count = len(scenario["agents"])
     block_count = len(scenario["game"]["block_to_agent"])
+    dt = float(getattr(gen, "dt", scenario.get("game", {}).get("dt", 0.15)))
 
     @jax.jit
     def _postprocess(final_mu, final_pi, context):
@@ -387,8 +388,10 @@ def _build_cartest_batched_postprocess(
         per_agent_cost = batched_nested_costs_from_plans(
             plans,
             scenario,
+            dt,
             k_inner=k_inner,
             obj_transform=obj_transform,
+            ctx=context,
         )[0]
         return selected_blocks, best_components, joint_x, per_agent_cost
 
@@ -404,7 +407,7 @@ def _build_cartest_batched_solver(gen, scenario, dims):
     ``rne_blocks`` path returns, so ``select_nash_plan`` and the closed-loop
     runner work unchanged.
     """
-    from Cartest.planning.batched_rne_solver import make_cartest_batched_rne_blocks_solver
+    from Cartest.planning.solvers.batched_rne_solver import make_cartest_batched_rne_blocks_solver
     game = scenario["game"]
     block_to_agent = tuple(game["block_to_agent"])
     M_agent = len(scenario["agents"])

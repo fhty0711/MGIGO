@@ -14,9 +14,9 @@ SCENARIO = {
     "agents": [
         {"name": "ego", "role": "ego", "s": 25.0, "s_dot": 15.0, "s_ddot": 0.0,
          "d": 0.0, "d_dot": 0.0, "d_ddot": 0.0, "psi": 0.0, "v_target": 17.5},
-        {"name": "front", "role": "front", "s": 35.0, "s_dot": 10.0, "s_ddot": 0.0,
-         "d": 3.5, "d_dot": 0.0, "d_ddot": 0.0, "psi": 0.0, "v_target": 20.0},
-        {"name": "rear", "role": "rear", "s": 5.0, "s_dot": 10.0, "s_ddot": 0.0,
+        {"name": "front", "role": "front", "s": 30.0, "s_dot": 16.0, "s_ddot": 0.0,
+         "d": 3.5, "d_dot": 0.0, "d_ddot": 0.0, "psi": 0.0, "v_target": 17.5},
+        {"name": "rear", "role": "rear", "s": 15.0, "s_dot": 15.0, "s_ddot": 0.0,
          "d": 3.5, "d_dot": 0.0, "d_ddot": 0.0, "psi": 0.0, "v_target": 17.5},
     ],
     "game": {
@@ -28,7 +28,7 @@ SCENARIO = {
         "K": 3,
         "B": 60,
         "B0": 25,
-        "T": 100,
+        "T": 300,
         "dt": 0.15,
         "T_0": 300,
         "M_inner": 30,

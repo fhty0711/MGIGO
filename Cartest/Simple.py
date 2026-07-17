@@ -10,6 +10,8 @@ import jax, jax.numpy as jnp
 import numpy as np
 from jax import random
 
+jax.config.update("jax_default_matmul_precision", "highest")
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from Cartest.core.frenet_traj import FrenetBSplineTrajectory
@@ -35,6 +37,9 @@ from Cartest.planning.solver_modes import (
     build_multi_agent_context,
     build_multi_agent_warmstart,
     select_nash_plan,
+)
+from Cartest.planning.costs.three_agent_track_components import (
+    selected_plan_component_report,
 )
 from Cartest.visualization.game_renderer import save_game_video
 
@@ -70,7 +75,8 @@ def block_until_ready(result):
 # MPC
 # ═══════════════════════════════════════════════════════════════════════
 
-def run_single_agent_mpc(steps=150, seed=0, plot=True, scenario_name="empty"):
+def run_single_agent_mpc(steps=150, seed=0, plot=True, scenario_name="empty",
+                         include_compile_time=False):
     scenario = get_scenario(scenario_name)
     ref_path = scenario["ref_path"]
     gen = FrenetBSplineTrajectory(BASIS / "bspline_basis.npz", ref_path)
@@ -101,11 +107,13 @@ def run_single_agent_mpc(steps=150, seed=0, plot=True, scenario_name="empty"):
 
     state = make_initial_state(scenario)
 
-    # ── JIT warm‑up: compile all JAX functions before the first timed step ──
-    ctx_warm = build_context(gen, state, v_target, lane_hw, obs_pos, obs_rad,
-                             lane_bounds_d=lane_bounds_d)
-    mu_warm = build_initial_mu(gen, state.s, state.s_dot, state.d)
-    _ = solver(random.PRNGKey(999), context=ctx_warm, initial_mu=mu_warm)
+    if not include_compile_time:
+        # Compile all JAX functions before the first timed step.
+        ctx_warm = build_context(gen, state, v_target, lane_hw, obs_pos, obs_rad,
+                                 lane_bounds_d=lane_bounds_d)
+        mu_warm = build_initial_mu(gen, state.s, state.s_dot, state.d)
+        block_until_ready(solver(random.PRNGKey(999), context=ctx_warm,
+                                 initial_mu=mu_warm))
 
     if plot:
         fig, ax_t, ax_k = setup_axes()
@@ -180,7 +188,8 @@ def _make_agent_states(scenario):
     ]
 
 
-def run_multi_agent_game(steps=30, seed=0, plot=True, scenario_name="game_2a_basic"):
+def run_multi_agent_game(steps=30, seed=0, plot=True, scenario_name="game_2a_basic",
+                         include_compile_time=False):
     scenario = get_scenario(scenario_name)
     gen = FrenetBSplineTrajectory(BASIS / "bspline_basis.npz", scenario["ref_path"])
     solver = build_cartest_nash_solver(gen, scenario)
@@ -188,12 +197,13 @@ def run_multi_agent_game(steps=30, seed=0, plot=True, scenario_name="game_2a_bas
     key = random.PRNGKey(seed)
     states = _make_agent_states(scenario)
 
-    ctx_warm = build_multi_agent_context(states)
-    mu_warm, L_warm = build_multi_agent_warmstart(
-        gen, scenario, states, random.PRNGKey(999))
-    block_until_ready(solver(
-        random.PRNGKey(1000), context=ctx_warm,
-        initial_mu=mu_warm, initial_S_or_L=L_warm))
+    if not include_compile_time:
+        ctx_warm = build_multi_agent_context(states)
+        mu_warm, L_warm = build_multi_agent_warmstart(
+            gen, scenario, states, random.PRNGKey(999))
+        block_until_ready(solver(
+            random.PRNGKey(1000), context=ctx_warm,
+            initial_mu=mu_warm, initial_S_or_L=L_warm))
 
     history_xy = []
     reports = []
@@ -214,19 +224,25 @@ def run_multi_agent_game(steps=30, seed=0, plot=True, scenario_name="game_2a_bas
         predicted_xy = []
         pi_values = []
         next_states = []
+        plan_dicts = []
         for plan in plans:
             agent_idx = plan["agent_idx"]
             state = states[agent_idx]
             agent_ctx = state.to_ctx()
             frenet, vehicle, (x_cart, y_cart) = gen.evaluate_plan(
                 plan["ctrl_s"], plan["ctrl_d"], agent_ctx)
-            s, d, s_dot, d_dot, s_ddot, d_ddot, _s3, _d3 = frenet
+            s, d, s_dot, d_dot, s_ddot, d_ddot, s_dddot, d_dddot = frenet
             idx = max(1, min(execute_index, vehicle.shape[0] - 1))
             next_states.append(execute_perfect_tracking_at(
                 s, d, s_dot, d_dot, s_ddot, d_ddot, vehicle[:, 3], index=idx))
             current_xy.append([float(vehicle[idx, 0]), float(vehicle[idx, 1])])
             predicted_xy.append(np.stack([np.array(x_cart), np.array(y_cart)], axis=-1))
             pi_values.append(np.array(plan["pi_s"]))
+            plan_dicts.append({
+                "s": s, "d": d, "s_dot": s_dot, "d_dot": d_dot,
+                "s_ddot": s_ddot, "d_ddot": d_ddot, "s_dddot": s_dddot,
+                "d_dddot": d_dddot, "vehicle": vehicle,
+            })
 
         history_xy.append(np.array(current_xy))
         states = next_states
@@ -238,6 +254,17 @@ def run_multi_agent_game(steps=30, seed=0, plot=True, scenario_name="game_2a_bas
             "pi": pi_values,
             "solve_ms": ms,
         }
+        # Selected-plan cost diagnostics (three-agent scenarios only; the
+        # component module is role-specific to ego/front/rear).  Pure-Python
+        # floats so the report stays serializer-friendly; does not affect the
+        # solver or warmstart.
+        if len(plan_dicts) == 3:
+            raw_report = selected_plan_component_report(
+                tuple(plan_dicts), scenario, ctx, gen.dt)
+            report["component_report"] = {
+                aid: {key: float(val) for key, val in comps.items()}
+                for aid, comps in raw_report.items()
+            }
         reports.append(report)
 
         state_line = " ".join(
@@ -252,15 +279,18 @@ def run_multi_agent_game(steps=30, seed=0, plot=True, scenario_name="game_2a_bas
         print(f"Saved game video: {output}")
 
 
-def run(steps=150, seed=0, plot=True, scenario_name="empty"):
+def run(steps=150, seed=0, plot=True, scenario_name="empty",
+        include_compile_time=False):
     scenario = get_scenario(scenario_name)
     kind = scenario_kind(scenario)
     if kind == "single_agent":
         return run_single_agent_mpc(steps=steps, seed=seed, plot=plot,
-                                    scenario_name=scenario_name)
+                                    scenario_name=scenario_name,
+                                    include_compile_time=include_compile_time)
     if kind == "multi_agent_game":
         return run_multi_agent_game(steps=steps, seed=seed, plot=plot,
-                                    scenario_name=scenario_name)
+                                    scenario_name=scenario_name,
+                                    include_compile_time=include_compile_time)
     raise ValueError(f"Unknown scenario type {kind!r} for scenario {scenario_name!r}")
 
 
@@ -273,6 +303,8 @@ def _parse():
     p.add_argument("--scenario", dest="scenario_flag",
                    choices=tuple(sorted(SCENARIOS)))
     p.add_argument("--no-plot", action="store_true")
+    p.add_argument("--include-compile-time", action="store_true",
+                   help="include first-call JAX compile time in step 0 solve timing")
     return p.parse_args()
 
 
@@ -281,4 +313,5 @@ if __name__ == "__main__":
     scenario_name = args.scenario_flag or args.scenario or "empty"
     steps = args.steps if args.steps is not None else default_steps_for_scenario(scenario_name)
     run(steps=steps, seed=args.seed, plot=not args.no_plot,
-        scenario_name=scenario_name)
+        scenario_name=scenario_name,
+        include_compile_time=args.include_compile_time)

@@ -6,7 +6,7 @@ jerk / forward motion) and the soft role objective (progress, lane target,
 bridged-jerk comfort, RSS/CVaR interaction risk).
 
 Both the scalar Constran path (``Cartest.planning.costs.three_agent_track``)
-and the batched path (``Cartest.planning.batched_game_eval``) import these
+and the batched path (``Cartest.planning.costs.three_agent_track_batched``) import these
 formulas so the two paths cannot drift.  Per-timestep helpers are
 shape-agnostic over leading axes (they work on ``[T]`` scalar plans, on
 ``[batch, T]`` batched plans, and on ``[B, M, T]`` pairwise plans); the

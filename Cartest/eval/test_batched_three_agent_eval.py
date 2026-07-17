@@ -81,7 +81,7 @@ def test_t_alpha_uses_exact_small_table_lookup():
 
 
 def test_batched_plan_eval_shapes_match_three_agents():
-    from Cartest.planning.batched_game_eval import evaluate_joint_plan_batch
+    from Cartest.planning.costs.three_agent_track_batched import evaluate_joint_plan_batch
 
     scenario = get_scenario("three_agent_track")
     gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
@@ -98,7 +98,7 @@ def test_batched_plan_eval_shapes_match_three_agents():
 
 
 def test_batched_agent_cost_matches_scalar_cost_for_fixed_joint_samples():
-    from Cartest.planning.batched_game_eval import evaluate_joint_plan_batch, batched_agent_costs_from_plans
+    from Cartest.planning.costs.three_agent_track_batched import evaluate_joint_plan_batch, batched_agent_costs_from_plans
 
     scenario = copy.deepcopy(get_scenario("three_agent_track"))
     gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
@@ -123,7 +123,7 @@ def test_batched_agent_cost_matches_scalar_cost_for_fixed_joint_samples():
 
 
 def test_front_and_rear_objectives_penalize_upper_lane_center_offset():
-    from Cartest.planning.batched_game_eval import batched_agent_costs_from_plans
+    from Cartest.planning.costs.three_agent_track_batched import batched_agent_costs_from_plans
 
     scenario = copy.deepcopy(get_scenario("three_agent_track"))
     horizon = 6
@@ -193,7 +193,7 @@ def test_front_and_rear_objectives_penalize_upper_lane_center_offset():
 
 
 def test_front_and_rear_objectives_penalize_reverse_longitudinal_motion():
-    from Cartest.planning.batched_game_eval import batched_agent_costs_from_plans
+    from Cartest.planning.costs.three_agent_track_batched import batched_agent_costs_from_plans
 
     scenario = copy.deepcopy(get_scenario("three_agent_track"))
     horizon = 6
@@ -228,7 +228,7 @@ def test_front_and_rear_objectives_penalize_reverse_longitudinal_motion():
 
 
 def test_speed_constraint_rejects_negative_frenet_progress_even_with_positive_vehicle_speed():
-    from Cartest.planning import batched_game_eval
+    from Cartest.planning.costs import three_agent_track_batched as batched_game_eval
 
     scenario = copy.deepcopy(get_scenario("three_agent_track"))
     horizon = 4
@@ -258,8 +258,77 @@ def test_speed_constraint_rejects_negative_frenet_progress_even_with_positive_ve
     assert jnp.max(speed) >= v_min + 1.0
 
 
+def test_batched_pairwise_rss_accepts_minimal_s_dot_plan_dicts():
+    from Cartest.planning.costs import three_agent_track_batched as batched_game_eval
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    horizon = 5
+    own = {
+        "s": jnp.linspace(10.0, 14.0, horizon)[None],
+        "d": jnp.full((1, horizon), 3.5),
+        "s_dot": jnp.full((1, horizon), 15.0),
+    }
+    neighbor = {
+        "s": jnp.linspace(20.0, 24.0, horizon)[None],
+        "d": jnp.full((1, horizon), 3.5),
+        "s_dot": jnp.full((1, horizon), 12.0),
+    }
+
+    risk = batched_game_eval._rss_pairwise_bm(own, (neighbor,), scenario, dt=0.15)
+
+    assert risk.shape == (1, 1)
+    assert jnp.all(jnp.isfinite(risk))
+
+
+def test_pairwise_objective_uses_bridged_jerk_context():
+    from Cartest.planning.costs import three_agent_track_batched as batched_game_eval
+    from Cartest.planning.costs.three_agent_track_components import role_soft_objective
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    horizon = 4
+    dt = 0.1
+    vehicle = jnp.zeros((1, horizon, 9), dtype=jnp.float32).at[..., 2].set(15.0)
+
+    def plan(s0, d0, speed):
+        s_dot = jnp.full((1, horizon), speed, dtype=jnp.float32)
+        s = s0 + jnp.arange(horizon, dtype=jnp.float32)[None] * speed * dt
+        d = jnp.full((1, horizon), d0, dtype=jnp.float32)
+        return {
+            "s": s,
+            "d": d,
+            "s_dot": s_dot,
+            "d_dot": jnp.zeros((1, horizon), dtype=jnp.float32),
+            "s_ddot": jnp.zeros((1, horizon), dtype=jnp.float32),
+            "d_ddot": jnp.zeros((1, horizon), dtype=jnp.float32),
+            "s_dddot": jnp.zeros((1, horizon), dtype=jnp.float32),
+            "d_dddot": jnp.zeros((1, horizon), dtype=jnp.float32),
+            "vehicle": vehicle,
+        }
+
+    candidate = (plan(0.0, 3.5, 15.0), plan(80.0, 3.5, 15.0), plan(-80.0, 3.5, 15.0))
+    background = (plan(0.0, 3.5, 15.0), plan(80.0, 3.5, 15.0), plan(-80.0, 3.5, 15.0))
+    ctx = {"a_long_prev_a0": 40.0, "a_lat_prev_a0": -20.0}
+
+    def candidate_to_pairwise(p):
+        return {k: v[:, None, ...] for k, v in p.items()}
+
+    def background_to_pairwise(p):
+        return {k: v[None, ...] for k, v in p.items()}
+
+    pairwise_plans = (
+        candidate_to_pairwise(candidate[0]),
+        background_to_pairwise(background[1]),
+        background_to_pairwise(background[2]),
+    )
+    expected = role_soft_objective(pairwise_plans, scenario, ctx, agent_idx=0, dt=dt)
+    actual = batched_game_eval._objective_pairwise_bm(
+        candidate, background, scenario, 0, dt, ctx=ctx)
+
+    assert jnp.allclose(actual, expected, rtol=1e-6, atol=1e-6)
+
+
 def test_batched_nested_cost_matches_constran_scalar_specs():
-    from Cartest.planning.batched_game_eval import evaluate_joint_plan_batch, batched_nested_costs_from_plans
+    from Cartest.planning.costs.three_agent_track_batched import evaluate_joint_plan_batch, batched_nested_costs_from_plans
     from Constraintdealer.Constran import build_multi_agent
 
     scenario = copy.deepcopy(get_scenario("three_agent_track"))
@@ -435,7 +504,7 @@ def test_scalar_and_batched_constraints_share_layer_metadata():
 
 
 def test_three_agent_batched_constraint_aggregates_use_reduced_layers():
-    from Cartest.planning.batched_game_eval import (
+    from Cartest.planning.costs.three_agent_track_batched import (
         batched_constraint_violations_from_plans,
         evaluate_joint_plan_batch,
     )
@@ -453,7 +522,7 @@ def test_three_agent_batched_constraint_aggregates_use_reduced_layers():
 
 
 def test_three_agent_batched_nested_cost_matches_scalar_specs():
-    from Cartest.planning.batched_game_eval import (
+    from Cartest.planning.costs.three_agent_track_batched import (
         batched_nested_costs_from_plans,
         evaluate_joint_plan_batch,
     )
@@ -483,6 +552,8 @@ if __name__ == "__main__":
     test_front_and_rear_objectives_penalize_upper_lane_center_offset()
     test_front_and_rear_objectives_penalize_reverse_longitudinal_motion()
     test_speed_constraint_rejects_negative_frenet_progress_even_with_positive_vehicle_speed()
+    test_batched_pairwise_rss_accepts_minimal_s_dot_plan_dicts()
+    test_pairwise_objective_uses_bridged_jerk_context()
     test_batched_nested_cost_matches_constran_scalar_specs()
     test_three_agent_collision_uses_vehicle_footprint_not_point_distance()
     test_three_agent_lane_bounds_use_vehicle_footprint_not_center_only()

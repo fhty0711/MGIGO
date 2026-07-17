@@ -171,7 +171,7 @@ def test_three_agent_track_uses_cartest_batched_rne_solver_mode():
 
 def test_cartest_batched_initial_pi_converts_to_natural_parameters():
     from Cartest.planning.solver_modes import _pi_to_v
-    from Cartest.planning.batched_rne_solver import _v_to_pi
+    from Cartest.planning.solvers.batched_rne_solver import _v_to_pi
 
     pi = jnp.array([[0.2, 0.3, 0.5], [0.6, 0.1, 0.3]])
     recovered = jax.vmap(_v_to_pi)(_pi_to_v(pi))
@@ -197,7 +197,8 @@ def test_cartest_batched_initial_pi_rejects_invalid_probabilities():
 
 
 def test_cartest_batched_explicit_initial_pi_overrides_warm_start_v():
-    from Cartest.planning import batched_game_eval, batched_rne_solver
+    from Cartest.planning.costs import three_agent_track_batched as batched_game_eval
+    from Cartest.planning.solvers import batched_rne_solver
     from Cartest.planning.solver_modes import _build_cartest_batched_solver, _pi_to_v
 
     captured = {}

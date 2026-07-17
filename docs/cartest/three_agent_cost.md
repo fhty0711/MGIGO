@@ -33,7 +33,7 @@ collision, RSS/CVaR risk, bridged-jerk comfort), not the final role preference.
 Shared formulas live in
 `Cartest/planning/costs/three_agent_track_components.py` and are consumed by
 both the scalar Constran path (`three_agent_track.py`) and the batched path
-(`batched_game_eval.py`), so the two cannot drift.
+(`three_agent_track_batched.py`), so the two cannot drift.
 
 - objective tradeoffs: progress/speed target, lane target or lane keeping,
   bridged-jerk comfort, RSS CVaR
@@ -74,8 +74,10 @@ never placed in outer Constran layers.
   actual neighbour plans.
 - `bridged_jerk_cost` bridges the horizon with the previous executed
   acceleration (`ctx["a_long_prev_a{idx}"]` / `["a_lat_prev_a{idx}"]`) when
-  present and falls back to zero otherwise; the closed-loop runner does not yet
-  fill those keys (shifted warmstart is a separate, later change).
+  present and falls back to zero otherwise. The scalar path, batched fast path,
+  and selected-plan postprocess all pass the same context through this term;
+  the closed-loop runner does not yet fill those keys (shifted warmstart is a
+  separate, later change).
 
 ## Validation
 
@@ -96,7 +98,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false /home/lenovo/mpcc/MGIGO/.venv/bin/python3 Ca
 
 Expected results:
 
-- pytest: all listed tests pass (55 tests).
+- pytest: all listed tests pass (58 tests).
 - `--steps 20 --no-plot`: exits 0, prints 20 steps, no NaN/Inf; selected-plan
   collision and lane-boundary diagnostics stay near zero for executed states.
 - `--steps 25`: exits 0 and writes a timestamped MP4 under `Cartest/output/`.

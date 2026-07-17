@@ -18,6 +18,7 @@ from Constraintdealer.Constran import (
 )
 from Cartest.planning.costs.three_agent_track import three_agent_batched_layers
 from Cartest.planning.costs.three_agent_track_components import (
+    _plan_s_dot,
     acc_limit_violation_per_t,
     bridged_jerk_cost,
     collision_lateral_clearance,
@@ -50,10 +51,6 @@ def agent_ctx(ctx, agent_idx):
 def theta_for_agent(joint_x, agent_idx, n_free):
     base = agent_idx * 2 * n_free
     return joint_x[base:base + 2 * n_free]
-
-
-def _plan_s_dot(plan):
-    return plan.get("s_dot", plan["vehicle"][..., 2])
 
 
 def evaluate_agent_plan_batch(gen, joint_batch, ctx, agent_idx):
@@ -90,15 +87,16 @@ def evaluate_joint_plan_batch(gen, joint_batch, ctx, agent_count=3):
     )
 
 
-def batched_agent_costs_from_plans(plans, scenario, dt):
+def batched_agent_costs_from_plans(plans, scenario, dt, ctx=None):
     """Return scalar objective costs shaped [batch, 3] using shared components.
 
     Mirrors the objective portion of
     ``Cartest.planning.costs.three_agent_track`` via the shared
     ``role_soft_objective`` so the scalar and batched paths cannot drift.
     """
+    ctx = {} if ctx is None else ctx
     return jnp.stack([
-        role_soft_objective(plans, scenario, {}, aid, dt)
+        role_soft_objective(plans, scenario, ctx, aid, dt)
         for aid in range(3)
     ], axis=-1)
 
@@ -154,14 +152,15 @@ def _obj_table(obj_transform):
     return OBJ_PRESETS.get(obj_transform, OBJ_TRANSFORM_STANDARD)
 
 
-def _objective_for_agent(plans, scenario, aid, dt):
+def _objective_for_agent(plans, scenario, aid, dt, ctx=None):
     """Raw objective [batch] for one agent via the shared role objective.
 
     Takes the full plan tuple so RSS interaction risk can be evaluated against
     the other agents.  Used by ``batched_nested_costs_from_plans`` (the
     full-plan validation path) so it matches the scalar specs exactly.
     """
-    return role_soft_objective(plans, scenario, {}, aid, dt)
+    ctx = {} if ctx is None else ctx
+    return role_soft_objective(plans, scenario, ctx, aid, dt)
 
 
 def _nest_one_agent(obj, violations, k_inner=1.0, obj_transform="standard"):
@@ -214,7 +213,8 @@ def _nest_one_agent_from_aggregates(obj, aggregate_values, k_inner=1.0,
     return M * sigma_k(inner, k=1.0)
 
 
-def batched_nested_costs_from_plans(plans, scenario, dt, k_inner=1.0, obj_transform="standard"):
+def batched_nested_costs_from_plans(plans, scenario, dt, k_inner=1.0,
+                                    obj_transform="standard", ctx=None):
     """Three-agent sigma-nested cost shaped [batch, 3].
 
     Batched replication of ``Constran._assemble_nest``: the raw objective is
@@ -224,9 +224,10 @@ def batched_nested_costs_from_plans(plans, scenario, dt, k_inner=1.0, obj_transf
     Constraints are applied in priority order (innermost -> outermost) and
     the objective uses ``sigma_k`` with ``k_inner``.
     """
+    ctx = {} if ctx is None else ctx
     return jnp.stack([
         _nest_one_agent(
-            _objective_for_agent(plans, scenario, aid, dt),
+            _objective_for_agent(plans, scenario, aid, dt, ctx),
             _violations_for_agent(plans, scenario, aid),
             k_inner, obj_transform)
         for aid in range(3)
@@ -324,7 +325,7 @@ def _rss_pairwise_bm(own, neighbor_backgrounds, scenario, dt):
     return rss_cvar_risk(own_b, nbrs_b, scenario, dt)
 
 
-def _objective_pairwise_bm(candidate, background, scenario, aid, dt):
+def _objective_pairwise_bm(candidate, background, scenario, aid, dt, ctx=None):
     """Objective shaped [B, M] for the fast expected-cost path.
 
     Candidate-only terms (progress / lane / comfort) broadcast as ``[B, 1]``
@@ -333,24 +334,25 @@ def _objective_pairwise_bm(candidate, background, scenario, aid, dt):
     the joint (candidate_b, background_m) plan, which is what
     ``test_batched_f_hat_matches_black_box_scalar_loop`` verifies.
     """
+    ctx = {} if ctx is None else ctx
     own = candidate[aid]
     v_target = float(scenario["agents"][aid]["v_target"])
     target_d = role_target_d(scenario, aid)
     progress = progress_objective(own, v_target)
     lane = lane_objective(own, target_d)
-    comfort = bridged_jerk_cost(own, {}, aid, dt)
+    comfort = bridged_jerk_cost(own, ctx, aid, dt)
     neighbor_bgs = tuple(background[j] for j in range(3) if j != aid)
     rss = _rss_pairwise_bm(own, neighbor_bgs, scenario, dt)
     return (progress + lane + comfort)[:, None] + rss
 
 
 def _fast_expected_cost_for_agent(candidate, background, scenario, aid,
-                                  dt, k_inner=1.0, obj_transform="standard"):
+                                  dt, ctx=None, k_inner=1.0, obj_transform="standard"):
     """Expected cost [B] for one acting agent without full-plan broadcasting."""
     B = candidate[aid]["s"].shape[0]
     M_inner = background[aid]["s"].shape[0]
     own = candidate[aid]
-    obj = _objective_pairwise_bm(candidate, background, scenario, aid, dt)  # [B, M]
+    obj = _objective_pairwise_bm(candidate, background, scenario, aid, dt, ctx)  # [B, M]
     own_aggs = {k: v[:, None] for k, v in _own_constraint_aggregates(own, scenario).items()}
     collision = _collision_aggregate_bm(candidate, background, scenario, aid)  # [B, M]
     own_aggs["safety_envelope"] = jnp.maximum(collision, own_aggs.pop("lane_boundary"))
@@ -410,6 +412,7 @@ def batched_expected_costs_for_all_agents(gen, samples_b, samples_m, ctx, scenar
     background = [_plans_for_agent_source(gen, samples_m, ctx, aid) for aid in range(3)]
     return jnp.stack([
         _fast_expected_cost_for_agent(candidate, background, scenario, aid,
-                                      dt=gen.dt, k_inner=k_inner, obj_transform=obj_transform)
+                                      dt=gen.dt, ctx=ctx, k_inner=k_inner,
+                                      obj_transform=obj_transform)
         for aid in range(3)
     ])
