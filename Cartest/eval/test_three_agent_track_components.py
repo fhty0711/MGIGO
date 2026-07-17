@@ -17,6 +17,7 @@ from Cartest.planning.costs.three_agent_track_components import (
     jerk_limit_violation,
     kinematics_violation,
     lane_boundary_violation,
+    selected_plan_component_report,
     speed_limit_violation,
     rss_cvar_risk,
     role_soft_objective,
@@ -107,6 +108,43 @@ def test_role_objectives_share_formula_but_not_role_targets():
     assert float(ego_cost) != float(front_cost)
 
 
+def test_selected_plan_report_has_named_components_for_each_agent():
+    scenario = {
+        "agents": [
+            {"role": "ego", "v_target": 17.5},
+            {"role": "front", "v_target": 20.0},
+            {"role": "rear", "v_target": 17.5},
+        ],
+        "behavior": {"ego_target_d": 3.5, "upper_lane_d": 3.5},
+        "road": {"lane_bounds_d": (-1.75, 5.25)},
+        "safety": {"vehicle_length": 5.0, "vehicle_width": 2.0, "v_max": 35.0, "acc_max": 5.0},
+    }
+    plans = (
+        _plan([10.0, 11.0, 12.0], [0.0, 0.2, 0.4], v=15.0),
+        _plan([30.0, 31.0, 32.0], [3.5, 3.5, 3.5], v=18.0),
+        _plan([0.0, 1.0, 2.0], [3.5, 3.5, 3.5], v=15.0),
+    )
+    reports = selected_plan_component_report(plans, scenario, ctx={}, dt=0.15)
+    assert set(reports.keys()) == {0, 1, 2}
+    for values in reports.values():
+        for key in [
+            "lane_boundary",
+            "collision",
+            "speed",
+            "acc",
+            "jerk",
+            "kinematics",
+            "forward",
+            "safety_envelope",
+            "progress",
+            "lane_preference",
+            "comfort",
+            "rss",
+        ]:
+            assert key in values
+            assert jnp.isfinite(values[key])
+
+
 if __name__ == "__main__":
     test_lane_boundary_uses_vehicle_body_tightened_bounds()
     test_forward_motion_penalizes_negative_s_dot()
@@ -114,4 +152,5 @@ if __name__ == "__main__":
     test_kinematics_layer_is_max_of_acc_and_jerk()
     test_rss_cvar_risk_increases_when_gap_is_small()
     test_role_objectives_share_formula_but_not_role_targets()
+    test_selected_plan_report_has_named_components_for_each_agent()
     print("three agent track component tests ok")

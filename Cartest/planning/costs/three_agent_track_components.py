@@ -406,3 +406,47 @@ def role_soft_objective(plans, scenario, ctx, agent_idx, dt):
     comfort = bridged_jerk_cost(own, ctx, agent_idx, dt)
     rss = rss_cvar_risk(own, neighbors, scenario, dt)
     return progress + lane + comfort + rss
+
+
+# ---------------------------------------------------------------------------
+# Selected-plan diagnostics (no optimization effect)
+# ---------------------------------------------------------------------------
+
+def selected_plan_component_report(plans, scenario, ctx, dt):
+    """Return per-agent named cost components for logging/debugging.
+
+    Does not affect optimization.  Returns a Python dict keyed by agent index;
+    each value holds both raw feasibility diagnostics (``speed``, ``acc``,
+    ``jerk``, ``forward``, ``collision``, ``lane_boundary``), the solver-layer
+    aggregates (``kinematics = max(acc, jerk)``, ``safety_envelope =
+    max(collision, lane_boundary)``), and the objective tradeoff terms
+    (``progress``, ``lane_preference``, ``comfort``, ``rss``).  All values are
+    max-over-horizon scalars (or mean-over-horizon for objective terms).
+    """
+    reports = {}
+    for agent_idx in range(len(plans)):
+        own = plans[agent_idx]
+        neighbors = tuple(plans[j] for j in range(len(plans)) if j != agent_idx)
+        v_target = float(scenario["agents"][agent_idx]["v_target"])
+        target_d = role_target_d(scenario, agent_idx)
+        speed = speed_limit_violation(own, scenario)
+        acc = acc_limit_violation(own, scenario)
+        jerk = jerk_limit_violation(own, scenario)
+        forward = forward_motion_violation(own, scenario)
+        collision = collision_violation(plans, scenario, agent_idx)
+        lane_boundary = lane_boundary_violation(own, scenario)
+        reports[agent_idx] = {
+            "lane_boundary": lane_boundary,
+            "collision": collision,
+            "speed": speed,
+            "acc": acc,
+            "jerk": jerk,
+            "kinematics": jnp.maximum(acc, jerk),
+            "forward": forward,
+            "safety_envelope": jnp.maximum(collision, lane_boundary),
+            "progress": progress_objective(own, v_target),
+            "lane_preference": lane_objective(own, target_d),
+            "comfort": bridged_jerk_cost(own, ctx, agent_idx, dt),
+            "rss": rss_cvar_risk(own, neighbors, scenario, dt),
+        }
+    return reports
