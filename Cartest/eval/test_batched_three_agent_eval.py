@@ -115,11 +115,147 @@ def test_batched_agent_cost_matches_scalar_cost_for_fixed_joint_samples():
     ], axis=0)
 
     plans = evaluate_joint_plan_batch(gen, joint_batch, ctx, agent_count=3)
-    batched = batched_agent_costs_from_plans(plans, scenario)
+    batched = batched_agent_costs_from_plans(plans, scenario, gen.dt)
 
     assert batched.shape == (2, 3)
     assert jnp.all(jnp.isfinite(batched))
     assert jnp.allclose(batched, scalar, rtol=2e-4, atol=2e-3)
+
+
+def test_front_and_rear_objectives_penalize_upper_lane_center_offset():
+    from Cartest.planning.batched_game_eval import batched_agent_costs_from_plans
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    horizon = 6
+    zeros = jnp.zeros(horizon)
+    vehicle = jnp.zeros((horizon, 9))
+    upper_lane_d = scenario["behavior"]["upper_lane_d"]
+
+    def scalar_plan(d_value):
+        d = jnp.full(horizon, d_value)
+        frenet = (zeros, d, zeros, zeros, zeros, zeros, zeros, zeros)
+        return frenet, vehicle, (zeros, d)
+
+    centered_scalar = (
+        scalar_plan(0.0), scalar_plan(upper_lane_d), scalar_plan(upper_lane_d))
+    offset_scalar = (
+        scalar_plan(0.0), scalar_plan(upper_lane_d - 0.4),
+        scalar_plan(upper_lane_d - 0.4))
+
+    class FakeGen:
+        T = horizon
+
+    specs = make_agent_specs(FakeGen(), scenario)
+    ctx = {
+        "s0_a1": 0.0,
+        "s_dot0_a1": scenario["agents"][1]["s_dot"],
+        "s0_a2": 0.0,
+        "s_dot0_a2": scenario["agents"][2]["s_dot"],
+    }
+    with patch("Cartest.planning.costs.three_agent_track._prepared_plans",
+               return_value=centered_scalar):
+        centered_front = specs[1][0](jnp.zeros(1), ctx)
+        centered_rear = specs[2][0](jnp.zeros(1), ctx)
+    with patch("Cartest.planning.costs.three_agent_track._prepared_plans",
+               return_value=offset_scalar):
+        offset_front = specs[1][0](jnp.zeros(1), ctx)
+        offset_rear = specs[2][0](jnp.zeros(1), ctx)
+
+    assert offset_front > centered_front
+    assert offset_rear > centered_rear
+
+    def batched_plan(d_value):
+        d = jnp.full((1, horizon), d_value)
+        return {
+            "s": jnp.zeros((1, horizon)),
+            "d": d,
+            "s_dot": jnp.zeros((1, horizon)),
+            "d_dot": jnp.zeros((1, horizon)),
+            "s_ddot": jnp.zeros((1, horizon)),
+            "d_ddot": jnp.zeros((1, horizon)),
+            "s_dddot": jnp.zeros((1, horizon)),
+            "d_dddot": jnp.zeros((1, horizon)),
+            "vehicle": vehicle[None],
+            "x": jnp.zeros((1, horizon)),
+            "y": d,
+        }
+
+    centered_batched = (
+        batched_plan(0.0), batched_plan(upper_lane_d), batched_plan(upper_lane_d))
+    offset_batched = (
+        batched_plan(0.0), batched_plan(upper_lane_d - 0.4),
+        batched_plan(upper_lane_d - 0.4))
+    centered_cost = batched_agent_costs_from_plans(centered_batched, scenario, 0.1)[0]
+    offset_cost = batched_agent_costs_from_plans(offset_batched, scenario, 0.1)[0]
+
+    assert offset_cost[1] > centered_cost[1]
+    assert offset_cost[2] > centered_cost[2]
+
+
+def test_front_and_rear_objectives_penalize_reverse_longitudinal_motion():
+    from Cartest.planning.batched_game_eval import batched_agent_costs_from_plans
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    horizon = 6
+    zeros = jnp.zeros(horizon)
+    vehicle = jnp.zeros((horizon, 9))
+    upper_lane_d = scenario["behavior"]["upper_lane_d"]
+
+    def plan(s_start, s_dot_value):
+        s = s_start + jnp.arange(horizon) * s_dot_value * 0.1
+        d = jnp.full(horizon, upper_lane_d)
+        frenet = (s, d, jnp.full(horizon, s_dot_value), zeros, zeros, zeros, zeros, zeros)
+        return {
+            "s": s[None],
+            "d": d[None],
+            "s_dot": jnp.full((1, horizon), s_dot_value),
+            "d_dot": zeros[None],
+            "s_ddot": zeros[None],
+            "d_ddot": zeros[None],
+            "s_dddot": zeros[None],
+            "d_dddot": zeros[None],
+            "vehicle": vehicle[None],
+            "x": s[None],
+            "y": d[None],
+        }
+
+    forward = (plan(35.0, 10.0), plan(45.0, 10.0), plan(15.0, 10.0))
+    reverse = (plan(35.0, 10.0), plan(45.0, 10.0), plan(15.0, -2.0))
+    forward_cost = batched_agent_costs_from_plans(forward, scenario, 0.1)[0]
+    reverse_cost = batched_agent_costs_from_plans(reverse, scenario, 0.1)[0]
+
+    assert reverse_cost[2] > forward_cost[2]
+
+
+def test_speed_constraint_rejects_negative_frenet_progress_even_with_positive_vehicle_speed():
+    from Cartest.planning import batched_game_eval
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    horizon = 4
+    upper_lane_d = scenario["behavior"]["upper_lane_d"]
+    v_min = scenario["safety"]["v_min"]
+    vehicle = jnp.zeros((1, horizon, 9)).at[..., 2].set(12.0)
+
+    def plan(s_dot_value):
+        s_dot = jnp.full((1, horizon), s_dot_value)
+        return {
+            "s": jnp.arange(horizon, dtype=jnp.float32)[None],
+            "d": jnp.full((1, horizon), upper_lane_d),
+            "s_dot": s_dot,
+            "d_dot": jnp.zeros((1, horizon)),
+            "s_ddot": jnp.zeros((1, horizon)),
+            "d_ddot": jnp.zeros((1, horizon)),
+            "s_dddot": jnp.zeros((1, horizon)),
+            "d_dddot": jnp.zeros((1, horizon)),
+            "vehicle": vehicle,
+            "x": jnp.arange(horizon, dtype=jnp.float32)[None],
+            "y": jnp.full((1, horizon), upper_lane_d),
+        }
+
+    plans = (plan(12.0), plan(12.0), plan(-1.0))
+    speed = batched_game_eval._violations_for_agent(plans, scenario, 2)["speed"][0]
+
+    assert jnp.max(speed) >= v_min + 1.0
 
 
 def test_batched_nested_cost_matches_constran_scalar_specs():
@@ -142,11 +278,25 @@ def test_batched_nested_cost_matches_constran_scalar_specs():
     ], axis=0)
 
     plans = evaluate_joint_plan_batch(gen, joint_batch, ctx, agent_count=3)
-    batched = batched_nested_costs_from_plans(plans, scenario, k_inner=1.0, obj_transform="standard")
+    batched = batched_nested_costs_from_plans(
+        plans, scenario, gen.dt, k_inner=1.0, obj_transform="standard")
 
     assert batched.shape == (2, 3)
     assert jnp.all(jnp.isfinite(batched))
     assert jnp.allclose(batched, scalar, rtol=2e-4, atol=2e-3)
+
+
+def _plan_dict(s, d, vehicle, zeros):
+    """Build a scalar [T] plan dict in the component-module shape."""
+    return {
+        "s": s, "d": d, "s_dot": zeros, "d_dot": zeros, "s_ddot": zeros,
+        "d_ddot": zeros, "s_dddot": zeros, "d_dddot": zeros, "vehicle": vehicle,
+    }
+
+
+def _batched_plan_dict(s, d, vehicle, zeros):
+    """Build a batched [1, T] plan dict in the component-module shape."""
+    return {k: v[None] for k, v in _plan_dict(s, d, vehicle, zeros).items()}
 
 
 def _collision_fixture_plans():
@@ -157,50 +307,98 @@ def _collision_fixture_plans():
     zeros = jnp.zeros(horizon)
     vehicle = jnp.zeros((horizon, 9))
 
-    def scalar_plan(s, x):
-        frenet = (s, zeros, zeros, zeros, zeros, zeros, zeros, zeros)
-        return frenet, vehicle, (x, zeros)
-
     scalar = (
-        scalar_plan(jnp.zeros(horizon), ego_x),
-        scalar_plan(jnp.full(horizon, 100.0), front_x),
-        scalar_plan(jnp.zeros(horizon), rear_x),
+        _plan_dict(ego_x, zeros, vehicle, zeros),
+        _plan_dict(front_x, zeros, vehicle, zeros),
+        _plan_dict(rear_x, zeros, vehicle, zeros),
     )
-
-    def batched_plan(s, x):
-        return {
-            "s": s[None], "d": zeros[None], "vehicle": vehicle[None],
-            "x": x[None], "y": zeros[None],
-        }
-
     batched = (
-        batched_plan(jnp.zeros(horizon), ego_x),
-        batched_plan(jnp.full(horizon, 100.0), front_x),
-        batched_plan(jnp.zeros(horizon), rear_x),
+        _batched_plan_dict(ego_x, zeros, vehicle, zeros),
+        _batched_plan_dict(front_x, zeros, vehicle, zeros),
+        _batched_plan_dict(rear_x, zeros, vehicle, zeros),
     )
     return scalar, batched
 
 
+def test_three_agent_collision_uses_vehicle_footprint_not_point_distance():
+    from Cartest.planning.costs import three_agent_track_components as components
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    horizon = 5
+    zeros = jnp.zeros(horizon)
+    vehicle = jnp.zeros((horizon, 9))
+    ego_s = jnp.zeros(horizon)
+    front_s = jnp.full(horizon, 4.5)
+    ego_d = jnp.zeros(horizon)
+    front_d = jnp.full(horizon, 1.5)
+    far_s = jnp.full(horizon, 100.0)
+    far_d = jnp.full(horizon, 3.5)
+
+    # Center distance is above safe_gap=3.0, so the old point-distance model
+    # would report no collision.  The vehicle bodies overlap longitudinally
+    # and laterally, so the three-agent footprint model must fire.
+    assert jnp.sqrt((front_s[0] - ego_s[0]) ** 2 + (front_d[0] - ego_d[0]) ** 2) > scenario["safety"]["safe_gap"]
+
+    scalar_plans = (
+        _plan_dict(ego_s, ego_d, vehicle, zeros),
+        _plan_dict(front_s, front_d, vehicle, zeros),
+        _plan_dict(far_s, far_d, vehicle, zeros),
+    )
+    batched_plans = (
+        _batched_plan_dict(ego_s, ego_d, vehicle, zeros),
+        _batched_plan_dict(front_s, front_d, vehicle, zeros),
+        _batched_plan_dict(far_s, far_d, vehicle, zeros),
+    )
+
+    scalar_ego = components.collision_violation_per_t(scalar_plans, scenario, 0)
+    batched_ego = components.collision_violation_per_t(batched_plans, scenario, 0)[0]
+
+    assert jnp.max(scalar_ego) > 0.0
+    assert jnp.max(batched_ego) > 0.0
+
+
+def test_three_agent_lane_bounds_use_vehicle_footprint_not_center_only():
+    from Cartest.planning.costs import three_agent_track_components as components
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    horizon = 4
+    zeros = jnp.zeros(horizon)
+    vehicle = jnp.zeros((horizon, 9))
+    ego_d = jnp.full(horizon, -1.2)
+    safe_center = jnp.full(horizon, -0.2)
+
+    lane_min, lane_max = components.lane_footprint_bounds(scenario)
+    assert ego_d[0] < lane_min
+
+    scalar_plans = (
+        _plan_dict(zeros, ego_d, vehicle, zeros),
+        _plan_dict(zeros, safe_center, vehicle, zeros),
+        _plan_dict(zeros, safe_center, vehicle, zeros),
+    )
+    batched_plans = (
+        _batched_plan_dict(zeros, ego_d, vehicle, zeros),
+        _batched_plan_dict(zeros, safe_center, vehicle, zeros),
+        _batched_plan_dict(zeros, safe_center, vehicle, zeros),
+    )
+
+    scalar_lane = components.lane_boundary_violation_per_t(scalar_plans[0], scenario)
+    batched_lane = components.lane_boundary_violation_per_t(batched_plans[0], scenario)[0]
+
+    assert jnp.max(scalar_lane) > 0.0
+    assert jnp.max(batched_lane) > 0.0
+
+
 def test_collision_prefix_includes_execute_index_for_scalar_and_batched_paths():
-    from Cartest.planning import batched_game_eval
-    from Cartest.planning.costs import three_agent_track as scalar_cost
+    from Cartest.planning.costs import three_agent_track_components as components
 
     scenario = copy.deepcopy(get_scenario("three_agent_track"))
     scenario["game"]["execute_index"] = 3
     scalar_plans, batched_plans = _collision_fixture_plans()
 
-    class FakeGen:
-        T = 5
-
-    specs = scalar_cost.make_agent_specs(FakeGen(), scenario)
-    with patch.object(scalar_cost, "_prepared_plans", return_value=scalar_plans):
-        scalar_front = specs[1][1][-1].g_fn(jnp.zeros(1), {})
-        scalar_rear = specs[2][1][-1].g_fn(jnp.zeros(1), {})
-
-    batched_front = batched_game_eval._violations_for_agent(
-        batched_plans, scenario, 1)["collision"][0]
-    batched_rear = batched_game_eval._violations_for_agent(
-        batched_plans, scenario, 2)["collision"][0]
+    scalar_front = components.collision_violation_per_t(scalar_plans, scenario, 1)
+    scalar_rear = components.collision_violation_per_t(scalar_plans, scenario, 2)
+    batched_front = components.collision_violation_per_t(batched_plans, scenario, 1)[0]
+    batched_rear = components.collision_violation_per_t(batched_plans, scenario, 2)[0]
 
     for values in (scalar_front, scalar_rear, batched_front, batched_rear):
         assert values[3] > 0.0
@@ -219,7 +417,7 @@ def test_scalar_and_batched_constraints_share_layer_metadata():
     batched_layers = three_agent_batched_layers()
 
     assert [definition[0] for definition in THREE_AGENT_CONSTRAINT_DEFS] == [
-        "lane", "speed", "acc", "jerk", "collision",
+        "speed", "kinematics", "forward", "safety_envelope",
     ]
     assert len(scalar_specs) == len(batched_layers)
     for definition, spec, layer in zip(
@@ -236,11 +434,60 @@ def test_scalar_and_batched_constraints_share_layer_metadata():
         assert jnp.array_equal(table[1], spec.get_transform_table()[1])
 
 
+def test_three_agent_batched_constraint_aggregates_use_reduced_layers():
+    from Cartest.planning.batched_game_eval import (
+        batched_constraint_violations_from_plans,
+        evaluate_joint_plan_batch,
+    )
+
+    scenario = get_scenario("three_agent_track")
+    gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
+    states = _states(scenario)
+    ctx = build_multi_agent_context(states)
+    mu, _ = build_multi_agent_warmstart(gen, scenario, states, jax.random.PRNGKey(2))
+    joint_x = mu[:, 0].reshape(-1)
+    plans = evaluate_joint_plan_batch(gen, joint_x[None], ctx, agent_count=3)
+    violations = batched_constraint_violations_from_plans(plans, scenario)
+    for agent_values in violations:
+        assert tuple(agent_values.keys()) == ("speed", "kinematics", "forward", "safety_envelope")
+
+
+def test_three_agent_batched_nested_cost_matches_scalar_specs():
+    from Cartest.planning.batched_game_eval import (
+        batched_nested_costs_from_plans,
+        evaluate_joint_plan_batch,
+    )
+    from Cartest.planning.costs.registry import make_agent_specs_from_scenario
+    from Constraintdealer.Constran import build_multi_agent
+
+    scenario = get_scenario("three_agent_track")
+    small = dict(scenario)
+    small["game"] = dict(scenario["game"], T=2, B=4, B0=2, M_inner=2)
+    gen = FrenetBSplineTrajectory(BASIS, small["ref_path"])
+    states = _states(small)
+    ctx = build_multi_agent_context(states)
+    mu, _ = build_multi_agent_warmstart(gen, small, states, jax.random.PRNGKey(3))
+    joint_x = mu[:, 0].reshape(-1)
+    plans = evaluate_joint_plan_batch(gen, joint_x[None], ctx, agent_count=3)
+    batched_cost = batched_nested_costs_from_plans(plans, small, gen.dt)[0]
+    scalar = build_multi_agent(make_agent_specs_from_scenario(gen, small), k_inner=1.0, obj_transform="standard")
+    scalar_cost = jnp.array([scalar[aid](aid, joint_x, ctx) for aid in range(3)])
+    assert jnp.all(jnp.isfinite(batched_cost))
+    assert jnp.allclose(batched_cost, scalar_cost, rtol=1e-4, atol=1e-4)
+
+
 if __name__ == "__main__":
     test_t_alpha_uses_exact_small_table_lookup()
     test_batched_plan_eval_shapes_match_three_agents()
     test_batched_agent_cost_matches_scalar_cost_for_fixed_joint_samples()
+    test_front_and_rear_objectives_penalize_upper_lane_center_offset()
+    test_front_and_rear_objectives_penalize_reverse_longitudinal_motion()
+    test_speed_constraint_rejects_negative_frenet_progress_even_with_positive_vehicle_speed()
     test_batched_nested_cost_matches_constran_scalar_specs()
+    test_three_agent_collision_uses_vehicle_footprint_not_point_distance()
+    test_three_agent_lane_bounds_use_vehicle_footprint_not_center_only()
     test_collision_prefix_includes_execute_index_for_scalar_and_batched_paths()
     test_scalar_and_batched_constraints_share_layer_metadata()
+    test_three_agent_batched_constraint_aggregates_use_reduced_layers()
+    test_three_agent_batched_nested_cost_matches_scalar_specs()
     print("batched three-agent eval tests ok")

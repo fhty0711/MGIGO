@@ -106,7 +106,11 @@ def pair_footprint_violation(s0, d0, s1, d1, longitudinal_clearance,
 
 
 def _plan_s_dot(plan):
-    return plan.get("s_dot", plan["vehicle"][..., 2])
+    # Conditional lookup: dict.get(k, default) evaluates default eagerly, so a
+    # plan dict without "vehicle" would raise KeyError on the default branch.
+    if "s_dot" in plan:
+        return plan["s_dot"]
+    return plan["vehicle"][..., 2]
 
 
 # ---------------------------------------------------------------------------

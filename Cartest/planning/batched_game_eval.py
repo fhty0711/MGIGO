@@ -16,9 +16,23 @@ from Constraintdealer.Constran import (
     OBJ_PRESETS,
     OBJ_TRANSFORM_STANDARD,
 )
-from Cartest.planning.costs.three_agent_track import (
-    _collision_prefix,
-    three_agent_batched_layers,
+from Cartest.planning.costs.three_agent_track import three_agent_batched_layers
+from Cartest.planning.costs.three_agent_track_components import (
+    acc_limit_violation_per_t,
+    bridged_jerk_cost,
+    collision_lateral_clearance,
+    collision_prefix,
+    collision_violation_per_t,
+    forward_motion_violation_per_t,
+    jerk_limit_violation_per_t,
+    lane_boundary_violation_per_t,
+    lane_objective,
+    pair_footprint_violation,
+    progress_objective,
+    role_soft_objective,
+    role_target_d,
+    rss_cvar_risk,
+    speed_limit_violation_per_t,
 )
 
 
@@ -36,6 +50,10 @@ def agent_ctx(ctx, agent_idx):
 def theta_for_agent(joint_x, agent_idx, n_free):
     base = agent_idx * 2 * n_free
     return joint_x[base:base + 2 * n_free]
+
+
+def _plan_s_dot(plan):
+    return plan.get("s_dot", plan["vehicle"][..., 2])
 
 
 def evaluate_agent_plan_batch(gen, joint_batch, ctx, agent_idx):
@@ -72,43 +90,17 @@ def evaluate_joint_plan_batch(gen, joint_batch, ctx, agent_count=3):
     )
 
 
-def pair_distance_violation(x0, y0, x1, y1, safe_dist):
-    dist = jnp.sqrt((x0 - x1) ** 2 + (y0 - y1) ** 2 + 1e-6)
-    return jnp.maximum(0.0, safe_dist - dist)
+def batched_agent_costs_from_plans(plans, scenario, dt):
+    """Return scalar objective costs shaped [batch, 3] using shared components.
 
-
-def batched_agent_costs_from_plans(plans, scenario):
-    """Return scalar objective costs shaped [batch, 3].
-
-    This intentionally matches the objective portion of
-    Cartest.planning.costs.three_agent_track.  Constran constraints are
-    handled by separate batched violation functions in later tasks.
+    Mirrors the objective portion of
+    ``Cartest.planning.costs.three_agent_track`` via the shared
+    ``role_soft_objective`` so the scalar and batched paths cannot drift.
     """
-    ego = plans[0]
-    front = plans[1]
-    rear = plans[2]
-    ego_target_d = float(scenario["behavior"].get("ego_target_d", 3.5))
-
-    ego_v_ref = float(scenario["agents"][0]["v_target"])
-    front_v_ref = float(scenario["agents"][1]["v_target"])
-    rear_v_ref = float(scenario["agents"][2]["v_target"])
-
-    ego_cost = (
-        3.0 * jnp.sum((ego["s_dot"] - ego_v_ref) ** 2, axis=-1)
-        + 10.0 * jnp.sum((ego["d"] - ego_target_d) ** 2, axis=-1)
-        + 5.0 * jnp.sum(ego["d_dot"] ** 2, axis=-1)
-        + 0.5 * jnp.sum(ego["d_ddot"] ** 2, axis=-1)
-        + jnp.sum(ego["s_dddot"] ** 2 + ego["d_dddot"] ** 2, axis=-1)
-    )
-    front_cost = (
-        3.0 * jnp.sum((front["s_dot"] - front_v_ref) ** 2, axis=-1)
-        + 2.0 * jnp.sum(front["s_ddot"] ** 2, axis=-1)
-    )
-    rear_cost = (
-        3.0 * jnp.sum((rear["s_dot"] - rear_v_ref) ** 2, axis=-1)
-        + 2.0 * jnp.sum(rear["s_ddot"] ** 2, axis=-1)
-    )
-    return jnp.stack([ego_cost, front_cost, rear_cost], axis=-1)
+    return jnp.stack([
+        role_soft_objective(plans, scenario, {}, aid, dt)
+        for aid in range(3)
+    ], axis=-1)
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -124,66 +116,27 @@ def _aggregate(values, mode):
 
 
 def _violations_for_agent(plans, scenario, aid):
-    """Raw constraint violations g[batch, T] for one agent.
+    """Raw feasibility-layer violations g[batch, T] for one agent.
 
-    Matches ``Cartest.planning.costs.three_agent_track`` g_fn semantics:
-    lane/speed/acc/jerk are identical for all agents; the collision term is
-    role-differentiated (ego full-horizon both neighbours, front/rear
-    short-horizon, rear additionally guards longitudinal clearance).
+    Reduced layer set matching ``three_agent_track.THREE_AGENT_CONSTRAINT_DEFS``:
+    ``speed``, ``kinematics = max(acc, jerk)``, ``forward``, and
+    ``safety_envelope = max(collision, lane_boundary)``.  Per-timestep values
+    come from the shared component module so scalar and batched paths use
+    identical formulas.
     """
-    safe_gap = float(scenario["safety"].get("safe_gap", 3.0))
-    vehicle_length = float(scenario["safety"].get("vehicle_length", 5.0))
-    v_min = float(scenario["safety"].get("v_min", 2.0))
-    v_max = float(scenario["safety"].get("v_max", 35.0))
-    acc_max = float(scenario["safety"].get("acc_max", 5.0))
-    jerk_max = float(scenario["safety"].get("jerk_max", 2.0))
-    lane_min, lane_max = scenario["road"].get("lane_bounds_d", (-1.75, 5.25))
-
-    plan = plans[aid]
-    vehicle = plan["vehicle"]
-    lane = jnp.maximum(jnp.maximum(0.0, lane_min - plan["d"]),
-                       jnp.maximum(0.0, plan["d"] - lane_max))
-    v = vehicle[..., 2]
-    speed = jnp.maximum(jnp.maximum(0.0, v_min - v), jnp.maximum(0.0, v - v_max))
-    a_long, a_lat = vehicle[..., 4], vehicle[..., 5]
-    a_mag = jnp.sqrt(a_long ** 2 + a_lat ** 2)
-    acc = jnp.maximum(
-        jnp.maximum(0.0, jnp.abs(a_long) - acc_max),
-        jnp.maximum(jnp.maximum(0.0, jnp.abs(a_lat) - acc_max), jnp.maximum(0.0, a_mag - acc_max)),
-    )
-    j_long, j_lat = vehicle[..., 6], vehicle[..., 7]
-    j_mag = jnp.sqrt(j_long ** 2 + j_lat ** 2)
-    jerk = jnp.maximum(
-        jnp.maximum(0.0, jnp.abs(j_long) - jerk_max),
-        jnp.maximum(jnp.maximum(0.0, jnp.abs(j_lat) - jerk_max), jnp.maximum(0.0, j_mag - jerk_max)),
-    )
-
-    short = _collision_prefix(scenario)
-    if aid == 0:
-        col = jnp.maximum(
-            pair_distance_violation(plan["x"], plan["y"], plans[1]["x"], plans[1]["y"], safe_gap),
-            pair_distance_violation(plan["x"], plan["y"], plans[2]["x"], plans[2]["y"], safe_gap),
-        )
-    elif aid == 1:
-        col = jnp.zeros_like(plan["x"])
-        ego_short = pair_distance_violation(
-            plan["x"][..., short], plan["y"][..., short],
-            plans[0]["x"][..., short], plans[0]["y"][..., short], safe_gap)
-        rear_short = pair_distance_violation(
-            plan["x"][..., short], plan["y"][..., short],
-            plans[2]["x"][..., short], plans[2]["y"][..., short], safe_gap)
-        col = col.at[..., short].set(jnp.maximum(ego_short, rear_short))
-    else:
-        col = jnp.zeros_like(plan["x"])
-        ego_short = pair_distance_violation(
-            plan["x"][..., short], plan["y"][..., short],
-            plans[0]["x"][..., short], plans[0]["y"][..., short], safe_gap)
-        col = col.at[..., short].set(ego_short)
-        clearance = vehicle_length + safe_gap
-        clearance_violation = jnp.maximum(0.0, clearance - (plans[1]["s"] - plan["s"]))
-        col = jnp.maximum(col, clearance_violation)
-
-    return {"lane": lane, "speed": speed, "acc": acc, "jerk": jerk, "collision": col}
+    own = plans[aid]
+    speed = speed_limit_violation_per_t(own, scenario)
+    acc = acc_limit_violation_per_t(own, scenario)
+    jerk = jerk_limit_violation_per_t(own, scenario)
+    forward = forward_motion_violation_per_t(own, scenario)
+    collision = collision_violation_per_t(plans, scenario, aid)
+    lane_boundary = lane_boundary_violation_per_t(own, scenario)
+    return {
+        "speed": speed,
+        "kinematics": jnp.maximum(acc, jerk),
+        "forward": forward,
+        "safety_envelope": jnp.maximum(collision, lane_boundary),
+    }
 
 
 def batched_constraint_violations_from_plans(plans, scenario):
@@ -201,22 +154,14 @@ def _obj_table(obj_transform):
     return OBJ_PRESETS.get(obj_transform, OBJ_TRANSFORM_STANDARD)
 
 
-def _objective_for_agent(plan, scenario, aid):
-    """Raw objective [batch] for one agent (matches three_agent_track specs)."""
-    ego_target_d = float(scenario["behavior"].get("ego_target_d", 3.5))
-    v_ref = float(scenario["agents"][aid]["v_target"])
-    if aid == 0:
-        return (
-            3.0 * jnp.sum((plan["s_dot"] - v_ref) ** 2, axis=-1)
-            + 10.0 * jnp.sum((plan["d"] - ego_target_d) ** 2, axis=-1)
-            + 5.0 * jnp.sum(plan["d_dot"] ** 2, axis=-1)
-            + 0.5 * jnp.sum(plan["d_ddot"] ** 2, axis=-1)
-            + jnp.sum(plan["s_dddot"] ** 2 + plan["d_dddot"] ** 2, axis=-1)
-        )
-    return (
-        3.0 * jnp.sum((plan["s_dot"] - v_ref) ** 2, axis=-1)
-        + 2.0 * jnp.sum(plan["s_ddot"] ** 2, axis=-1)
-    )
+def _objective_for_agent(plans, scenario, aid, dt):
+    """Raw objective [batch] for one agent via the shared role objective.
+
+    Takes the full plan tuple so RSS interaction risk can be evaluated against
+    the other agents.  Used by ``batched_nested_costs_from_plans`` (the
+    full-plan validation path) so it matches the scalar specs exactly.
+    """
+    return role_soft_objective(plans, scenario, {}, aid, dt)
 
 
 def _nest_one_agent(obj, violations, k_inner=1.0, obj_transform="standard"):
@@ -269,7 +214,7 @@ def _nest_one_agent_from_aggregates(obj, aggregate_values, k_inner=1.0,
     return M * sigma_k(inner, k=1.0)
 
 
-def batched_nested_costs_from_plans(plans, scenario, k_inner=1.0, obj_transform="standard"):
+def batched_nested_costs_from_plans(plans, scenario, dt, k_inner=1.0, obj_transform="standard"):
     """Three-agent sigma-nested cost shaped [batch, 3].
 
     Batched replication of ``Constran._assemble_nest``: the raw objective is
@@ -281,7 +226,7 @@ def batched_nested_costs_from_plans(plans, scenario, k_inner=1.0, obj_transform=
     """
     return jnp.stack([
         _nest_one_agent(
-            _objective_for_agent(plans[aid], scenario, aid),
+            _objective_for_agent(plans, scenario, aid, dt),
             _violations_for_agent(plans, scenario, aid),
             k_inner, obj_transform)
         for aid in range(3)
@@ -289,89 +234,126 @@ def batched_nested_costs_from_plans(plans, scenario, k_inner=1.0, obj_transform=
 
 
 def _own_constraint_aggregates(plan, scenario):
-    """Aggregate non-interaction constraints for one candidate plan batch."""
-    v_min = float(scenario["safety"].get("v_min", 2.0))
-    v_max = float(scenario["safety"].get("v_max", 35.0))
-    acc_max = float(scenario["safety"].get("acc_max", 5.0))
-    jerk_max = float(scenario["safety"].get("jerk_max", 2.0))
-    lane_min, lane_max = scenario["road"].get("lane_bounds_d", (-1.75, 5.25))
+    """Aggregate non-interaction (candidate-only) constraints for one batch.
 
-    vehicle = plan["vehicle"]
-    lane = jnp.maximum(jnp.maximum(0.0, lane_min - plan["d"]),
-                       jnp.maximum(0.0, plan["d"] - lane_max))
-    v = vehicle[..., 2]
-    speed = jnp.maximum(jnp.maximum(0.0, v_min - v), jnp.maximum(0.0, v - v_max))
-    a_long, a_lat = vehicle[..., 4], vehicle[..., 5]
-    a_mag = jnp.sqrt(a_long ** 2 + a_lat ** 2)
-    acc = jnp.maximum(
-        jnp.maximum(0.0, jnp.abs(a_long) - acc_max),
-        jnp.maximum(jnp.maximum(0.0, jnp.abs(a_lat) - acc_max), jnp.maximum(0.0, a_mag - acc_max)),
-    )
-    j_long, j_lat = vehicle[..., 6], vehicle[..., 7]
-    j_mag = jnp.sqrt(j_long ** 2 + j_lat ** 2)
-    jerk = jnp.maximum(
-        jnp.maximum(0.0, jnp.abs(j_long) - jerk_max),
-        jnp.maximum(jnp.maximum(0.0, jnp.abs(j_lat) - jerk_max), jnp.maximum(0.0, j_mag - jerk_max)),
-    )
+    Returns the reduced-layer aggregates with collision deferred to the
+    pairwise path: ``speed``, ``kinematics = max(acc, jerk)``, ``forward``,
+    and ``lane_boundary`` (the caller folds ``lane_boundary`` into
+    ``safety_envelope`` with the pairwise collision term).
+    """
+    speed = speed_limit_violation_per_t(plan, scenario)
+    acc = acc_limit_violation_per_t(plan, scenario)
+    jerk = jerk_limit_violation_per_t(plan, scenario)
+    forward = forward_motion_violation_per_t(plan, scenario)
+    lane_boundary = lane_boundary_violation_per_t(plan, scenario)
     return {
-        "lane": _aggregate(lane, "q95"),
         "speed": _aggregate(speed, "max"),
-        "acc": _aggregate(acc, "max"),
-        "jerk": _aggregate(jerk, "max"),
+        "kinematics": _aggregate(jnp.maximum(acc, jerk), "max"),
+        "forward": _aggregate(forward, "max"),
+        "lane_boundary": _aggregate(lane_boundary, "max"),
     }
 
 
-def _pair_distance_violation_bm(candidate, background):
-    """Pairwise distance violation for candidate [B,T] and background [M,T]."""
-    safe_gap = candidate["safe_gap"]
-    dx = candidate["x"][:, None, :] - background["x"][None, :, :]
-    dy = candidate["y"][:, None, :] - background["y"][None, :, :]
-    dist = jnp.sqrt(dx ** 2 + dy ** 2 + 1e-6)
-    return jnp.maximum(0.0, safe_gap - dist)
+def _pair_footprint_violation_bm(candidate, background, longitudinal_clearance,
+                                 lateral_clearance):
+    """Pairwise footprint violation for candidate [B,T] and background [M,T]."""
+    return pair_footprint_violation(
+        candidate["s"][:, None, :], candidate["d"][:, None, :],
+        background["s"][None, :, :], background["d"][None, :, :],
+        longitudinal_clearance, lateral_clearance)
 
 
 def _collision_aggregate_bm(candidate, backgrounds, scenario, aid):
     """Collision aggregate shaped [B, M_inner] for one acting agent."""
     safe_gap = float(scenario["safety"].get("safe_gap", 3.0))
     vehicle_length = float(scenario["safety"].get("vehicle_length", 5.0))
-    short = _collision_prefix(scenario)
-    own = dict(candidate[aid], safe_gap=safe_gap)
+    longitudinal_clearance = vehicle_length + safe_gap
+    lateral_clearance = collision_lateral_clearance(scenario)
+    short = collision_prefix(scenario)
+    own = candidate[aid]
 
     if aid == 0:
         front = backgrounds[1]
         rear = backgrounds[2]
-        ego_front = _pair_distance_violation_bm(own, front)
-        ego_rear = _pair_distance_violation_bm(own, rear)
+        ego_front = _pair_footprint_violation_bm(
+            own, front, longitudinal_clearance, lateral_clearance)
+        ego_rear = _pair_footprint_violation_bm(
+            own, rear, longitudinal_clearance, lateral_clearance)
         return jnp.max(jnp.maximum(ego_front, ego_rear), axis=-1)
 
     if aid == 1:
         ego = backgrounds[0]
         rear = backgrounds[2]
-        front_ego = _pair_distance_violation_bm(own, ego)[..., short]
-        front_rear = _pair_distance_violation_bm(own, rear)[..., short]
+        front_ego = _pair_footprint_violation_bm(
+            own, ego, longitudinal_clearance, lateral_clearance)[..., short]
+        front_rear = _pair_footprint_violation_bm(
+            own, rear, longitudinal_clearance, lateral_clearance)[..., short]
         return jnp.max(jnp.maximum(front_ego, front_rear), axis=-1)
 
     ego = backgrounds[0]
     front = backgrounds[1]
-    rear_ego_short = _pair_distance_violation_bm(own, ego)[..., short]
+    rear_ego_short = _pair_footprint_violation_bm(
+        own, ego, longitudinal_clearance, lateral_clearance)[..., short]
     rear_ego = jnp.max(rear_ego_short, axis=-1)
-    clearance = vehicle_length + safe_gap
-    clearance_violation = jnp.maximum(
-        0.0, clearance - (front["s"][None, :, :] - own["s"][:, None, :])
-    )
-    rear_front = jnp.max(clearance_violation, axis=-1)
+    rear_front = jnp.max(_pair_footprint_violation_bm(
+        own, front, longitudinal_clearance, lateral_clearance), axis=-1)
     return jnp.maximum(rear_ego, rear_front)
 
 
+def _rss_pairwise_bm(own, neighbor_backgrounds, scenario, dt):
+    """RSS CVaR risk shaped [B, M] for a candidate batch vs background neighbours.
+
+    Reshapes the acting candidate to ``[B, 1, T]`` and each background neighbour
+    to ``[1, M, T]`` so the shared ``rss_cvar_risk`` broadcasts over the
+    ``B x M`` candidate/background grid.  Element ``[b, m]`` is exactly the
+    scalar RSS risk of the joint (candidate_b, background_m) plan.
+    """
+    own_b = {
+        "s": own["s"][:, None, :],
+        "d": own["d"][:, None, :],
+        "s_dot": _plan_s_dot(own)[:, None, :],
+    }
+    nbrs_b = tuple(
+        {
+            "s": nb["s"][None, :, :],
+            "d": nb["d"][None, :, :],
+            "s_dot": _plan_s_dot(nb)[None, :, :],
+        }
+        for nb in neighbor_backgrounds
+    )
+    return rss_cvar_risk(own_b, nbrs_b, scenario, dt)
+
+
+def _objective_pairwise_bm(candidate, background, scenario, aid, dt):
+    """Objective shaped [B, M] for the fast expected-cost path.
+
+    Candidate-only terms (progress / lane / comfort) broadcast as ``[B, 1]``
+    and the RSS interaction risk is computed pairwise against the background
+    neighbour batches as ``[B, M]``.  This matches the scalar cost evaluated on
+    the joint (candidate_b, background_m) plan, which is what
+    ``test_batched_f_hat_matches_black_box_scalar_loop`` verifies.
+    """
+    own = candidate[aid]
+    v_target = float(scenario["agents"][aid]["v_target"])
+    target_d = role_target_d(scenario, aid)
+    progress = progress_objective(own, v_target)
+    lane = lane_objective(own, target_d)
+    comfort = bridged_jerk_cost(own, {}, aid, dt)
+    neighbor_bgs = tuple(background[j] for j in range(3) if j != aid)
+    rss = _rss_pairwise_bm(own, neighbor_bgs, scenario, dt)
+    return (progress + lane + comfort)[:, None] + rss
+
+
 def _fast_expected_cost_for_agent(candidate, background, scenario, aid,
-                                  k_inner=1.0, obj_transform="standard"):
+                                  dt, k_inner=1.0, obj_transform="standard"):
     """Expected cost [B] for one acting agent without full-plan broadcasting."""
     B = candidate[aid]["s"].shape[0]
     M_inner = background[aid]["s"].shape[0]
     own = candidate[aid]
-    obj = _objective_for_agent(own, scenario, aid)[:, None]  # [B, 1]
+    obj = _objective_pairwise_bm(candidate, background, scenario, aid, dt)  # [B, M]
     own_aggs = {k: v[:, None] for k, v in _own_constraint_aggregates(own, scenario).items()}
-    own_aggs["collision"] = _collision_aggregate_bm(candidate, background, scenario, aid)
+    collision = _collision_aggregate_bm(candidate, background, scenario, aid)  # [B, M]
+    own_aggs["safety_envelope"] = jnp.maximum(collision, own_aggs.pop("lane_boundary"))
     pair_cost = _nest_one_agent_from_aggregates(
         obj, own_aggs, k_inner=k_inner, obj_transform=obj_transform)
     return pair_cost.reshape((B, M_inner)).mean(axis=1)
@@ -428,6 +410,6 @@ def batched_expected_costs_for_all_agents(gen, samples_b, samples_m, ctx, scenar
     background = [_plans_for_agent_source(gen, samples_m, ctx, aid) for aid in range(3)]
     return jnp.stack([
         _fast_expected_cost_for_agent(candidate, background, scenario, aid,
-                                      k_inner=k_inner, obj_transform=obj_transform)
+                                      dt=gen.dt, k_inner=k_inner, obj_transform=obj_transform)
         for aid in range(3)
     ])
