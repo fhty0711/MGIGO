@@ -36,6 +36,8 @@ COLORS = ("#2ecc71", "#1f77b4", "#d1495b", "#f4a261", "#b388eb")
 DARK_COLORS = ("#1a8a4a", "#13496e", "#8a2e38", "#9d5f28", "#6d4ca2")
 PANEL_BG = "#0f172a"
 PANEL_TEXT = "#e2e8f0"
+PANEL_DPI = 150
+PANEL_PIXEL_HEIGHT = 608
 
 
 def _road_bounds(road):
@@ -262,8 +264,8 @@ def _create_game_figure(with_panel=True):
     fig, (road_ax, info_ax) = plt.subplots(
         1,
         2,
-        figsize=(14.0, 4.05),
-        dpi=150,
+        figsize=(14.0, PANEL_PIXEL_HEIGHT / PANEL_DPI),
+        dpi=PANEL_DPI,
         gridspec_kw={"width_ratios": [4.8, 2.2], "wspace": 0.025},
     )
     fig.patch.set_facecolor("#0a1120")

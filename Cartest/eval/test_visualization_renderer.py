@@ -279,8 +279,10 @@ def test_game_renderer_draws_nash_panel_ghosts_and_saves_frame(tmp_path):
     import matplotlib.pyplot as plt
 
     from Cartest.visualization.game_renderer import (
+        _create_game_figure,
         render_game_frame,
         save_game_frame,
+        save_game_video,
     )
 
     history = np.array([
@@ -343,6 +345,23 @@ def test_game_renderer_draws_nash_panel_ghosts_and_saves_frame(tmp_path):
     save_game_frame(report, output)
     assert output.exists()
     assert output.stat().st_size > 1000
+
+    encoded_fig, _, _ = _create_game_figure(with_panel=True)
+    try:
+        pixel_width, pixel_height = (
+            encoded_fig.get_size_inches() * encoded_fig.dpi
+        ).astype(int)
+    finally:
+        plt.close(encoded_fig)
+    assert pixel_width % 2 == 0
+    assert pixel_height % 2 == 0
+
+    from matplotlib.animation import writers
+    if writers.is_available("ffmpeg"):
+        video = tmp_path / "nash_frame.mp4"
+        save_game_video([report], video, fps=1)
+        assert video.exists()
+        assert video.stat().st_size > 1000
 
 
 if __name__ == "__main__":
