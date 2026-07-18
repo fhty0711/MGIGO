@@ -69,7 +69,7 @@ def make_empirical_best_response_solver(gen, scenario, agent_idx):
     """
     def objective(x, ctx):
         own = x.reshape((1, 2, gen.n_free))
-        return expected_cost_for_agent_controls(
+        cost = expected_cost_for_agent_controls(
             gen,
             own,
             ctx["br_frozen_joint_controls"],
@@ -77,6 +77,11 @@ def make_empirical_best_response_solver(gen, scenario, agent_idx):
             scenario,
             agent_idx,
         )[0]
+        # M22 explores an unbounded Gaussian support.  Extremely remote
+        # B-spline controls can overflow intermediate trajectory/cost terms;
+        # keep the optimizer's ranking function total in that region.
+        return jnp.nan_to_num(
+            cost, nan=1e6, posinf=1e6, neginf=1e6)
 
     game = scenario["game"]
     return build_solver(
@@ -140,6 +145,7 @@ def run_empirical_best_response(
     restart_costs = []
     restart_controls = []
     restart_runtime_ms = []
+    restart_status = []
 
     for restart_index, restart_key in enumerate(restart_keys):
         if restart_index == 0:
@@ -156,8 +162,19 @@ def run_empirical_best_response(
             initial_S_or_L=agent_l,
             initial_pi=agent_pi,
         )
-        controls = jnp.asarray(result.x).reshape((2, gen.n_free))
-        controls.block_until_ready()
+        raw_controls = result.x
+        valid = raw_controls is not None
+        if valid:
+            controls = jnp.asarray(raw_controls).reshape((2, gen.n_free))
+            controls.block_until_ready()
+            valid = bool(np.all(np.isfinite(
+                np.asarray(jax.device_get(controls)))))
+        if not valid:
+            # A failed restart is conservatively equivalent to "no deviation".
+            # This preserves the finite equilibrium baseline and prevents one
+            # unstable multistart branch from fabricating an improvement or
+            # discarding the other valid restarts.
+            controls = equilibrium_controls
         runtime_ms = (time.perf_counter_ns() - started) / 1e6
         cost = expected_cost_for_agent_controls(
             gen,
@@ -167,9 +184,15 @@ def run_empirical_best_response(
             scenario,
             agent_idx,
         )[0]
-        restart_costs.append(float(jax.device_get(cost)))
+        cost_value = float(jax.device_get(cost))
+        if not np.isfinite(cost_value):
+            controls = equilibrium_controls
+            cost_value = equilibrium_expected
+            valid = False
+        restart_costs.append(cost_value)
         restart_controls.append(np.asarray(jax.device_get(controls)))
         restart_runtime_ms.append(float(runtime_ms))
+        restart_status.append("ok" if valid else "invalid")
 
     summary = summarize_best_response_restarts(
         equilibrium_expected, restart_costs)
@@ -195,6 +218,7 @@ def run_empirical_best_response(
         "best_controls": best_controls.tolist(),
         "best_response_xy": best_response_xy.tolist(),
         "restart_runtime_ms": restart_runtime_ms,
+        "restart_status": restart_status,
         "diagnostic_runtime_ms": float(sum(restart_runtime_ms)),
         "background_key": _key_as_list(background_key),
         "restart_keys": [_key_as_list(key) for key in restart_keys],

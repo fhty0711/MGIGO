@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import copy
 import sys
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -227,6 +228,54 @@ def test_empirical_best_response_replays_keys_and_returns_finite_plan():
         replay["equilibrium_expected_cost"])
     assert first["epsilon_br"] >= 0.0
     assert first["method"] == "empirical_distributional_best_response_2_restart"
+
+
+def test_empirical_best_response_isolates_invalid_restart():
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    scenario["game"] = dict(scenario["game"], M_inner=2)
+    gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
+    states = [
+        FrenetState(
+            s=agent["s"], s_dot=agent["s_dot"],
+            s_ddot=agent.get("s_ddot", 0.0),
+            d=agent["d"], d_dot=agent.get("d_dot", 0.0),
+            d_ddot=agent.get("d_ddot", 0.0),
+            psi=agent.get("psi", 0.0),
+        )
+        for agent in scenario["agents"]
+    ]
+    context = build_multi_agent_context(states)
+    mu, precision_cholesky = build_multi_agent_warmstart(
+        gen, scenario, states, jax.random.PRNGKey(11))
+    pi = jnp.full((6, 3), 1.0 / 3.0)
+    selected = mu[:, 1]
+    calls = {"count": 0}
+
+    def flaky_solver(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return SimpleNamespace(x=None)
+        return SimpleNamespace(x=selected[0:2].reshape(-1))
+
+    result = run_empirical_best_response(
+        gen=gen,
+        scenario=scenario,
+        agent_idx=0,
+        point_equilibrium_cost=1.0,
+        mu=mu,
+        precision_cholesky=precision_cholesky,
+        pi=pi,
+        selected_blocks=selected,
+        context=context,
+        background_key=jax.random.PRNGKey(12),
+        restart_keys=[jax.random.PRNGKey(13), jax.random.PRNGKey(14)],
+        solver=flaky_solver,
+    )
+
+    assert result["restart_status"] == ["invalid", "ok"]
+    assert np.isclose(
+        result["restart_costs"][0], result["equilibrium_expected_cost"])
+    assert np.all(np.isfinite(result["best_controls"]))
 
 
 def test_analysis_summary_separates_solver_and_diagnostic_timing(tmp_path):

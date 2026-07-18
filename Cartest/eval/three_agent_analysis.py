@@ -390,6 +390,11 @@ def run_three_agent_analysis(
             frame_results = {}
             ghost_paths = []
             for aid in range(3):
+                print(
+                    f"best_response frame={frame_name} step={step} "
+                    f"agent={names[aid]}",
+                    flush=True,
+                )
                 background_key = jax.random.fold_in(frame_key, aid)
                 restart_keys = [
                     jax.random.fold_in(frame_key, 100 + aid * 3 + restart)
