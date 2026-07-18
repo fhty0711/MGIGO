@@ -204,7 +204,13 @@ def _render_nash_panel(ax, report):
 
     statuses = report.get("agent_status", [])
     br_diag = report.get("best_response_diag", {})
-    top = 0.80
+    if br_diag:
+        ax.text(
+            0.04, 0.842,
+            "solid=joint plan  dashed=empirical best response",
+            color="#94a3b8", fontsize=6.9, family="monospace", va="top",
+        )
+    top = 0.78 if br_diag else 0.80
     row_height = 0.245 if br_diag else 0.205
     for aid, status in enumerate(statuses):
         name = str(status.get("name", f"agent{aid}"))

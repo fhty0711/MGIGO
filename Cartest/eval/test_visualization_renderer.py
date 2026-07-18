@@ -336,6 +336,7 @@ def test_game_renderer_draws_nash_panel_ghosts_and_saves_frame(tmp_path):
     assert "v/target" in text
     assert "epsilon_mode" in text
     assert "epsilon_br" in text
+    assert "solid=joint plan" in text
     assert "best_response_ego" in line_gids
 
     output = tmp_path / "nash_frame.png"
