@@ -24,6 +24,7 @@ from Cartest.eval.nash_game_diagnostics import (
     select_nash_keyframes,
     summarize_best_response_restarts,
 )
+from Cartest.eval.three_agent_analysis import run_three_agent_analysis
 from Cartest.core.frenet_traj import FrenetBSplineTrajectory
 from Cartest.execution.execute import FrenetState
 from Cartest.planning.scenarios import get_scenario
@@ -226,3 +227,22 @@ def test_empirical_best_response_replays_keys_and_returns_finite_plan():
         replay["equilibrium_expected_cost"])
     assert first["epsilon_br"] >= 0.0
     assert first["method"] == "empirical_distributional_best_response_2_restart"
+
+
+def test_analysis_summary_separates_solver_and_diagnostic_timing(tmp_path):
+    summary = run_three_agent_analysis(
+        steps=2,
+        T=1,
+        seed=0,
+        output_dir=tmp_path,
+        render_video=False,
+        run_best_response=False,
+        game_overrides={"B": 4, "B0": 2, "M_inner": 2, "T_0": 2},
+    )
+
+    assert summary["configuration"]["steps"] == 2
+    assert len(summary["timing"]["solve_ms"]) == 2
+    assert "diagnostic_ms" in summary["timing"]
+    assert isinstance(summary["timing"]["solve_ms"], list)
+    assert Path(summary["artifacts"]["json"]).exists()
+    assert Path(summary["artifacts"]["npz"]).exists()
