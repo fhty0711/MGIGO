@@ -112,12 +112,54 @@ def _output_paths(output_dir, T, steps, seed):
         "json": stem.with_suffix(".json"),
         "npz": stem.with_suffix(".npz"),
         "video": stem.with_suffix(".mp4"),
+        "keyframe_dir": Path(f"{stem}_keyframes"),
+        "contact_sheet": Path(f"{stem}_keyframes_contact_sheet.png"),
     }
+
+
+def _save_keyframe_artifacts(reports, keyframes, paths, road):
+    from Cartest.visualization.game_renderer import (
+        compute_game_limits,
+        save_game_frame,
+    )
+
+    keyframe_dir = paths["keyframe_dir"]
+    keyframe_dir.mkdir(parents=True, exist_ok=True)
+    frame_paths = {}
+    for name, step in keyframes.items():
+        output = keyframe_dir / f"{int(step):03d}_{name}.png"
+        limits = compute_game_limits(reports[:step + 1], road=road)
+        save_game_frame(reports[step], output, road=road, limits=limits)
+        frame_paths[name] = output
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    count = len(frame_paths)
+    columns = min(2, max(1, count))
+    rows = int(np.ceil(count / columns))
+    fig, axes = plt.subplots(
+        rows, columns, figsize=(14 * columns, 4.05 * rows),
+        dpi=100, squeeze=False)
+    fig.patch.set_facecolor("#0a1120")
+    for ax in axes.flat:
+        ax.axis("off")
+        ax.set_facecolor("#0a1120")
+    for ax, (name, image_path) in zip(axes.flat, frame_paths.items()):
+        ax.imshow(plt.imread(image_path))
+        ax.set_title(name, color="white", fontsize=12)
+        ax.axis("off")
+    fig.tight_layout(pad=0.35)
+    fig.savefig(paths["contact_sheet"], facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return frame_paths
 
 
 def run_three_agent_analysis(
         steps=150, T=300, seed=0, output_dir=None, *, render_video=True,
-        run_best_response=True, game_overrides=None, fps=5):
+        run_best_response=True, save_keyframes=True, game_overrides=None,
+        fps=5):
     """Run the game, then compute diagnostics and save JSON/NPZ/video outputs."""
     scenario = copy.deepcopy(get_scenario("three_agent_track"))
     scenario["game"] = dict(scenario["game"], T=int(T))
@@ -378,6 +420,11 @@ def run_three_agent_analysis(
             reports[step]["best_response_xy"] = ghost_paths
             reports[step]["best_response_diag"] = frame_results
 
+    keyframe_paths = {}
+    if save_keyframes:
+        keyframe_paths = _save_keyframe_artifacts(
+            reports, keyframes, paths, scenario.get("road", {}))
+
     ego_d = state_array[:, 0, 1]
     lane_target = float(
         scenario.get("behavior", {}).get("ego_target_d", 3.5))
@@ -512,6 +559,11 @@ def run_three_agent_analysis(
             "video": str(paths["video"]) if render_video else None,
             "json": str(paths["json"]),
             "npz": str(paths["npz"]),
+            "keyframes": {
+                name: str(path) for name, path in keyframe_paths.items()
+            },
+            "contact_sheet": (
+                str(paths["contact_sheet"]) if save_keyframes else None),
         },
     }
 
@@ -554,6 +606,12 @@ def _parse_args():
     parser.add_argument("--fps", type=int, default=5)
     parser.add_argument("--no-video", action="store_true")
     parser.add_argument("--no-best-response", action="store_true")
+    parser.add_argument("--no-keyframes", action="store_true")
+    parser.add_argument(
+        "--keyframes-only",
+        action="store_true",
+        help="save diagnostic PNGs/contact sheet without rendering the MP4",
+    )
     return parser.parse_args()
 
 
@@ -564,8 +622,9 @@ def main():
         T=args.T,
         seed=args.seed,
         output_dir=args.output_dir,
-        render_video=not args.no_video,
+        render_video=not args.no_video and not args.keyframes_only,
         run_best_response=not args.no_best_response,
+        save_keyframes=not args.no_keyframes,
         fps=args.fps,
     )
     print(json.dumps({

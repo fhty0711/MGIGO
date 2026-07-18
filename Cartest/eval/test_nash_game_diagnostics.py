@@ -237,6 +237,7 @@ def test_analysis_summary_separates_solver_and_diagnostic_timing(tmp_path):
         output_dir=tmp_path,
         render_video=False,
         run_best_response=False,
+        save_keyframes=True,
         game_overrides={"B": 4, "B0": 2, "M_inner": 2, "T_0": 2},
     )
 
@@ -246,3 +247,5 @@ def test_analysis_summary_separates_solver_and_diagnostic_timing(tmp_path):
     assert isinstance(summary["timing"]["solve_ms"], list)
     assert Path(summary["artifacts"]["json"]).exists()
     assert Path(summary["artifacts"]["npz"]).exists()
+    assert Path(summary["artifacts"]["contact_sheet"]).exists()
+    assert summary["artifacts"]["keyframes"]

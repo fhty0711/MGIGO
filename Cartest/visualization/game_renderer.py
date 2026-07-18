@@ -34,6 +34,8 @@ DIVIDER = "#cbd5e1"
 HIST_CLR = "#ffd166"
 COLORS = ("#2ecc71", "#1f77b4", "#d1495b", "#f4a261", "#b388eb")
 DARK_COLORS = ("#1a8a4a", "#13496e", "#8a2e38", "#9d5f28", "#6d4ca2")
+PANEL_BG = "#0f172a"
+PANEL_TEXT = "#e2e8f0"
 
 
 def _road_bounds(road):
@@ -169,7 +171,101 @@ def _visible_xy(points, limits, pad=6.0):
     return arr[mask]
 
 
-def render_game_frame(ax, report, road=None, limits=None):
+def _format_probabilities(values):
+    return np.array2string(
+        np.asarray(values, dtype=float),
+        precision=2,
+        separator=",",
+        suppress_small=True,
+    )
+
+
+def _render_nash_panel(ax, report):
+    """Render fixed-width solver and unilateral-deviation diagnostics."""
+    ax.clear()
+    ax.set_facecolor(PANEL_BG)
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    keyframe = report.get("keyframe_name")
+    title = "Nash game diagnostics"
+    if keyframe:
+        title += f"  |  {keyframe}"
+    ax.text(
+        0.04, 0.96, title,
+        color="white", fontsize=10, fontweight="bold",
+        family="monospace", va="top",
+    )
+    ax.text(
+        0.04, 0.885,
+        "restricted 3x3 component deviations",
+        color="#94a3b8", fontsize=7.5, family="monospace", va="top",
+    )
+
+    statuses = report.get("agent_status", [])
+    br_diag = report.get("best_response_diag", {})
+    top = 0.80
+    row_height = 0.245 if br_diag else 0.205
+    for aid, status in enumerate(statuses):
+        name = str(status.get("name", f"agent{aid}"))
+        color = COLORS[aid % len(COLORS)]
+        mode = status.get("mode", ("?", "?"))
+        line1 = (
+            f"{name:<5} v/target={status.get('speed', 0.0):4.1f}/"
+            f"{status.get('target_speed', 0.0):4.1f}  "
+            f"mode=({mode[0]},{mode[1]})\n"
+            f"      epsilon_mode={status.get('epsilon_mode', 0.0):.3e}"
+        )
+        y = top - aid * row_height
+        ax.text(
+            0.04, y, line1,
+            color=color, fontsize=8.2, family="monospace", va="top",
+            linespacing=1.35,
+        )
+        ax.text(
+            0.04, y - 0.088,
+            f"      pi_s={_format_probabilities(status.get('pi_s', []))}\n"
+            f"      pi_d={_format_probabilities(status.get('pi_d', []))}",
+            color=PANEL_TEXT, fontsize=7.6, family="monospace", va="top",
+            linespacing=1.3,
+        )
+        if name in br_diag:
+            diag = br_diag[name]
+            ax.text(
+                0.04, y - 0.172,
+                f"      epsilon_br={diag.get('epsilon_br', 0.0):.3e}\n"
+                f"      J_eq={diag.get('equilibrium_expected_cost', 0.0):.4f}"
+                f" -> J_br={diag.get('best_response_cost', 0.0):.4f}",
+                color="#fbbf24", fontsize=7.5, family="monospace", va="top",
+                linespacing=1.3,
+            )
+
+    ax.text(
+        0.04, 0.025,
+        "epsilon_br: finite-sample evidence, not an exact Nash proof",
+        color="#64748b", fontsize=6.8, family="monospace", va="bottom",
+    )
+
+
+def _create_game_figure(with_panel=True):
+    if not with_panel:
+        fig, road_ax = plt.subplots(figsize=(12, 3.44), dpi=150)
+        fig.patch.set_facecolor("#0a1120")
+        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.91)
+        return fig, road_ax, None
+    fig, (road_ax, info_ax) = plt.subplots(
+        1,
+        2,
+        figsize=(14.0, 4.05),
+        dpi=150,
+        gridspec_kw={"width_ratios": [4.8, 2.2], "wspace": 0.025},
+    )
+    fig.patch.set_facecolor("#0a1120")
+    fig.subplots_adjust(left=0.01, right=0.995, bottom=0.02, top=0.91)
+    return fig, road_ax, info_ax
+
+
+def render_game_frame(ax, report, road=None, limits=None, info_ax=None):
     """Render one multi-agent game report on an axis."""
     road = road or {}
     ax.clear()
@@ -181,6 +277,7 @@ def render_game_frame(ax, report, road=None, limits=None):
         "agent_names", [f"agent{i}" for i in range(history_xy.shape[1])]
     )
     predicted = report.get("predicted_xy", [])
+    best_response_xy = report.get("best_response_xy", [])
     pi_values = report.get("pi", []) if road.get("show_pi", False) else []
     vehicle_length = float(road.get("vehicle_length", 5.0))
     vehicle_width = float(road.get("vehicle_width", 2.0))
@@ -217,6 +314,20 @@ def render_game_frame(ax, report, road=None, limits=None):
                             alpha=0.08 if agent_idx == 0 else 0.11,
                             zorder=3,
                         ))
+        if agent_idx < len(best_response_xy):
+            ghost = _visible_xy(best_response_xy[agent_idx], limits)
+            if len(ghost) >= 2:
+                ghost = _smooth_xy(ghost, samples_per_segment=8)
+                line, = ax.plot(
+                    ghost[:, 0],
+                    ghost[:, 1],
+                    color=color,
+                    linestyle=(0, (3, 3)),
+                    linewidth=1.8,
+                    alpha=0.72,
+                    zorder=6,
+                )
+                line.set_gid(f"best_response_{agent_names[agent_idx]}")
         center = traj[-1]
         heading = 0.0
         if len(traj) >= 2:
@@ -260,19 +371,46 @@ def render_game_frame(ax, report, road=None, limits=None):
             clip_on=False,
             bbox={"facecolor": "#020617", "edgecolor": "#475569",
                   "alpha": 0.90, "pad": 2.5})
+    if info_ax is not None:
+        _render_nash_panel(info_ax, report)
+
+
+def save_game_frame(report, output_path, road=None, limits=None):
+    """Save one PNG using exactly the same layout as the MP4 renderer."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, road_ax, info_ax = _create_game_figure(
+        with_panel=bool(report.get("agent_status")))
+    try:
+        limits = limits or compute_game_limits([report], road=road)
+        render_game_frame(
+            road_ax,
+            report,
+            road=road,
+            limits=limits,
+            info_ax=info_ax,
+        )
+        fig.savefig(output_path, dpi=150, facecolor=fig.get_facecolor())
+    finally:
+        plt.close(fig)
 
 
 def save_game_video(reports, output_path, road=None, fps=5):
     """Save a multi-agent rollout animation to an MP4 video via ffmpeg."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(12, 3.44), dpi=150)
-    fig.patch.set_facecolor("#0a1120")
-    fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.91)
+    fig, road_ax, info_ax = _create_game_figure(
+        with_panel=any(report.get("agent_status") for report in reports))
 
     def update(frame_idx):
         limits = compute_game_limits(reports[:frame_idx + 1], road=road)
-        render_game_frame(ax, reports[frame_idx], road=road, limits=limits)
+        render_game_frame(
+            road_ax,
+            reports[frame_idx],
+            road=road,
+            limits=limits,
+            info_ax=info_ax,
+        )
         return []
 
     anim = FuncAnimation(fig, update, frames=len(reports),

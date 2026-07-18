@@ -272,6 +272,78 @@ def test_plotting_render_frame_keeps_default_straight_road_compatibility():
     assert "executed_history" in line_gids
 
 
+def test_game_renderer_draws_nash_panel_ghosts_and_saves_frame(tmp_path):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from Cartest.visualization.game_renderer import (
+        render_game_frame,
+        save_game_frame,
+    )
+
+    history = np.array([
+        [[0.0, 0.0], [8.0, 3.5], [-7.0, 3.5]],
+        [[2.0, 0.2], [10.0, 3.5], [-5.0, 3.5]],
+    ])
+    predicted = [
+        np.column_stack([np.linspace(2.0, 25.0, 12), np.linspace(0.2, 3.5, 12)]),
+        np.column_stack([np.linspace(10.0, 31.0, 12), np.full(12, 3.5)]),
+        np.column_stack([np.linspace(-5.0, 18.0, 12), np.full(12, 3.5)]),
+    ]
+    report = {
+        "step": 4,
+        "solve_ms": 92.0,
+        "history_xy": history,
+        "predicted_xy": predicted,
+        "agent_names": ["ego", "front", "rear"],
+        "keyframe_name": "max_rss",
+        "agent_status": [
+            {
+                "name": name,
+                "speed": 15.0 - aid,
+                "target_speed": 17.5,
+                "mode": [1, aid],
+                "epsilon_mode": 1e-4 * aid,
+                "pi_s": [0.1, 0.8, 0.1],
+                "pi_d": [0.7, 0.2, 0.1],
+            }
+            for aid, name in enumerate(("ego", "front", "rear"))
+        ],
+        "best_response_xy": predicted,
+        "best_response_diag": {
+            name: {
+                "epsilon_br": 1e-3 * (aid + 1),
+                "equilibrium_expected_cost": 0.126,
+                "best_response_cost": 0.125,
+            }
+            for aid, name in enumerate(("ego", "front", "rear"))
+        },
+    }
+
+    fig, (road_ax, info_ax) = plt.subplots(
+        1, 2, figsize=(12, 4), gridspec_kw={"width_ratios": [4.8, 2.2]})
+    try:
+        render_game_frame(road_ax, report, info_ax=info_ax)
+        text = "\n".join(item.get_text() for item in info_ax.texts)
+        line_gids = {
+            line.get_gid() for line in road_ax.lines if line.get_gid()
+        }
+    finally:
+        plt.close(fig)
+
+    assert "v/target" in text
+    assert "epsilon_mode" in text
+    assert "epsilon_br" in text
+    assert "best_response_ego" in line_gids
+
+    output = tmp_path / "nash_frame.png"
+    save_game_frame(report, output)
+    assert output.exists()
+    assert output.stat().st_size > 1000
+
+
 if __name__ == "__main__":
     test_scene_renderer_draws_basic_layers()
     test_frenet_renderer_draws_report_scene()
