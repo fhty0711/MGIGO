@@ -49,6 +49,129 @@ def _make_samples(gen, scenario):
     return samples_b, samples_m
 
 
+def _legacy_sample_all_blocks(mu, S, pi_all, count, key):
+    """Reference sampler copied from the pre-cache production implementation."""
+    block_count, component_count = mu.shape[:2]
+
+    def sample_block(block_index, block_key):
+        components = jax.random.choice(
+            block_key, component_count,
+            p=pi_all[block_index], shape=(count,))
+
+        def sample_one(component, sample_key):
+            covariance = jnp.linalg.inv(
+                S[block_index, component]
+                + jnp.eye(S.shape[-1], dtype=S.dtype) * 1e-7)
+            return jax.random.multivariate_normal(
+                sample_key, mu[block_index, component], covariance)
+
+        return jax.vmap(sample_one)(
+            components, jax.random.split(block_key, count))
+
+    return jax.vmap(sample_block)(
+        jnp.arange(block_count), jax.random.split(key, block_count))
+
+
+def _sampler_inputs():
+    block_count, component_count, dim = 6, 3, 8
+    mu = jnp.arange(
+        block_count * component_count * dim, dtype=jnp.float32
+    ).reshape(block_count, component_count, dim) / 17.0
+    raw = jax.random.normal(
+        jax.random.PRNGKey(91),
+        (block_count, component_count, dim, dim),
+    )
+    precision = (
+        raw @ jnp.swapaxes(raw, -1, -2)
+        + 0.5 * jnp.eye(dim, dtype=raw.dtype)
+    )
+    pi = jnp.tile(jnp.asarray([[0.15, 0.55, 0.30]], dtype=mu.dtype),
+                  (block_count, 1))
+    return mu, precision, pi
+
+
+def test_covariance_cached_sampler_matches_legacy_stream_exactly():
+    from Cartest.planning.solvers import batched_rne_solver
+
+    covariance_fn = getattr(
+        batched_rne_solver, "_precision_covariances", None)
+    sample_fn = getattr(
+        batched_rne_solver, "_sample_all_blocks_from_covariances", None)
+    pools_fn = getattr(
+        batched_rne_solver, "_sample_iteration_pools", None)
+    assert callable(covariance_fn)
+    assert callable(sample_fn)
+    assert callable(pools_fn)
+
+    mu, precision, pi = _sampler_inputs()
+    covariances = covariance_fn(precision)
+    for seed in (0, 1, 17):
+        iteration_key = jax.random.PRNGKey(seed)
+        key_b, key_m = jax.random.split(iteration_key)
+        expected_b = _legacy_sample_all_blocks(
+            mu, precision, pi, 7, key_b)
+        expected_m = _legacy_sample_all_blocks(
+            mu, precision, pi, 5, key_m)
+
+        actual_b = sample_fn(mu, covariances, pi, 7, key_b)
+        actual_m = sample_fn(mu, covariances, pi, 5, key_m)
+        pooled_b, pooled_m = pools_fn(
+            mu, precision, pi, 7, 5, iteration_key)
+
+        assert jnp.array_equal(actual_b, expected_b)
+        assert jnp.array_equal(actual_m, expected_m)
+        assert jnp.array_equal(pooled_b, expected_b)
+        assert jnp.array_equal(pooled_m, expected_m)
+
+
+def _legacy_iteration_pools(mu, S, pi_all, B, M_inner, key):
+    key_b, key_m = jax.random.split(key)
+    return (
+        _legacy_sample_all_blocks(mu, S, pi_all, B, key_b),
+        _legacy_sample_all_blocks(mu, S, pi_all, M_inner, key_m),
+    )
+
+
+def test_complete_solver_matches_legacy_sampler_exactly():
+    from Cartest.planning.solvers import batched_rne_solver
+
+    pools_fn = getattr(
+        batched_rne_solver, "_sample_iteration_pools", None)
+    assert callable(pools_fn)
+
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    scenario["game"] = dict(
+        scenario["game"], T=2, B=4, B0=2, M_inner=3, K=2)
+    gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
+    states = _states(scenario)
+    ctx = build_multi_agent_context(states)
+    mu, L_inv = build_multi_agent_warmstart(
+        gen, scenario, states, jax.random.PRNGKey(92))
+    mu = mu[:, :2]
+    L_inv = L_inv[:, :2]
+    solve_key = jax.random.PRNGKey(93)
+
+    optimized_solver = batched_rne_solver.make_cartest_batched_rne_blocks_solver(
+        gen, scenario)
+    optimized = optimized_solver(
+        solve_key, context=ctx, initial_mu=mu, initial_L_inv=L_inv)
+    jax.block_until_ready(optimized)
+
+    with patch.object(
+            batched_rne_solver, "_sample_iteration_pools",
+            side_effect=_legacy_iteration_pools):
+        legacy_solver = batched_rne_solver.make_cartest_batched_rne_blocks_solver(
+            gen, scenario)
+        legacy = legacy_solver(
+            solve_key, context=ctx, initial_mu=mu, initial_L_inv=L_inv)
+        jax.block_until_ready(legacy)
+
+    for name in ("mu", "L_inv", "pi", "v"):
+        assert jnp.array_equal(optimized[name], legacy[name]), name
+    assert jax.tree.all(
+        jax.tree.map(jnp.array_equal, optimized["metrics"], legacy["metrics"]))
+
+
 def test_batched_f_hat_matches_black_box_scalar_loop():
     from Cartest.planning.costs.three_agent_track_batched import batched_expected_costs_for_all_agents
 

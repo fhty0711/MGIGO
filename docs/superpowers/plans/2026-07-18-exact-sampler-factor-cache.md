@@ -1,10 +1,10 @@
-# Exact Sampler Factor Cache Implementation Plan
+# Exact Sampler Covariance Cache Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Cache the 18 Cartest RNE component covariance factors once per optimizer iteration and share them between the B and M sample pools while preserving every sample and complete solver output bit-for-bit.
+**Goal:** Cache the 18 Cartest RNE component covariance matrices once per optimizer iteration and share them between the B and M sample pools while preserving every sample and complete solver output bit-for-bit.
 
-**Architecture:** Add pure factorization and factor-based sampling helpers to `batched_rne_solver.py`, plus one iteration-pool helper that owns the single factorization and the unchanged B/M key split. Keep `_sample_all_blocks` as an exact compatibility wrapper. Route the JIT scan through the iteration-pool helper without changing costs, selection, updates, or returned diagnostics.
+**Architecture:** Add pure precision-inversion and covariance-based sampling helpers to `batched_rne_solver.py`, plus one iteration-pool helper that owns the single inversion and the unchanged B/M key split. Keep `_sample_all_blocks` as an exact compatibility wrapper and keep JAX's original `random.multivariate_normal` call so CUDA lowering remains bitwise identical. Route the JIT scan through the iteration-pool helper without changing costs, selection, updates, or returned diagnostics.
 
 **Tech Stack:** Python 3.10+, JAX/JAX NumPy, pytest, Windows CPU JAX, WSL2 CUDA JAX.
 
@@ -27,11 +27,11 @@
 
 **Interfaces:**
 - Consumes: existing `_sample_all_blocks(mu, S, pi_all, count, key)` behavior.
-- Produces: required helpers `_precision_covariance_factors(S)`, `_sample_all_blocks_from_factors(mu, factors, pi_all, count, key)`, and `_sample_iteration_pools(mu, S, pi_all, B, M_inner, key)`.
+- Produces: required helpers `_precision_covariances(S)`, `_sample_all_blocks_from_covariances(mu, covariances, pi_all, count, key)`, and `_sample_iteration_pools(mu, S, pi_all, B, M_inner, key)`.
 
 - [ ] **Step 1: Add a test-local legacy reference and a failing direct-equivalence test**
 
-Add a `_legacy_sample_all_blocks` function that copies the current sampler exactly. Add `test_factor_cached_sampler_matches_legacy_stream_exactly`, which first asserts that the three required production helpers exist, then compares B and M pools for multiple keys using `jnp.array_equal` and a nonuniform mixture.
+Add a `_legacy_sample_all_blocks` function that copies the current sampler exactly. Add `test_covariance_cached_sampler_matches_legacy_stream_exactly`, which first asserts that the three required production helpers exist, then compares B and M pools for multiple keys using `jnp.array_equal` and a nonuniform mixture.
 
 ```python
 def _legacy_sample_all_blocks(mu, S, pi_all, count, key):
@@ -60,10 +60,10 @@ def _legacy_sample_all_blocks(mu, S, pi_all, count, key):
 Run:
 
 ```powershell
-python -m pytest Cartest/eval/test_batched_rne_solver.py -k factor_cached_sampler_matches_legacy_stream_exactly -q
+python -m pytest Cartest/eval/test_batched_rne_solver.py -k covariance_cached_sampler_matches_legacy_stream_exactly -q
 ```
 
-Expected: FAIL because `_precision_covariance_factors`, `_sample_all_blocks_from_factors`, and `_sample_iteration_pools` do not yet exist.
+Expected: FAIL because `_precision_covariances`, `_sample_all_blocks_from_covariances`, and `_sample_iteration_pools` do not yet exist.
 
 - [ ] **Step 3: Add a failing complete-solver equivalence test**
 
@@ -79,7 +79,7 @@ python -m pytest Cartest/eval/test_batched_rne_solver.py -k complete_solver_matc
 
 Expected: FAIL because the iteration-pool seam is missing.
 
-### Task 2: Implement factor caching and route the scan through it
+### Task 2: Implement covariance caching and route the scan through it
 
 **Files:**
 - Modify: `Cartest/planning/solvers/batched_rne_solver.py:55-76`
@@ -88,21 +88,20 @@ Expected: FAIL because the iteration-pool seam is missing.
 
 **Interfaces:**
 - Consumes: the helper contracts established by Task 1.
-- Produces: an exact compatibility `_sample_all_blocks` and a scan that factors once per iteration for both sample pools.
+- Produces: an exact compatibility `_sample_all_blocks` and a scan that inverts once per component per iteration for both sample pools.
 
-- [ ] **Step 1: Implement `_precision_covariance_factors`**
+- [ ] **Step 1: Implement `_precision_covariances`**
 
 ```python
-def _precision_covariance_factors(S):
+def _precision_covariances(S):
     eye = jnp.eye(S.shape[-1], dtype=S.dtype) * 1e-7
-    covariance = vmap(vmap(jnp.linalg.inv))(S + eye)
-    return vmap(vmap(jnp.linalg.cholesky))(covariance)
+    return vmap(vmap(jnp.linalg.inv))(S + eye)
 ```
 
-- [ ] **Step 2: Implement factor-based sampling without changing keys**
+- [ ] **Step 2: Implement covariance-based sampling without changing keys or CUDA lowering**
 
 ```python
-def _sample_all_blocks_from_factors(mu, factors, pi_all, count, key):
+def _sample_all_blocks_from_covariances(mu, covariances, pi_all, count, key):
     block_count, component_count = mu.shape[:2]
 
     def sample_block(block_index, block_key):
@@ -110,9 +109,9 @@ def _sample_all_blocks_from_factors(mu, factors, pi_all, count, key):
             block_key, component_count, p=pi_all[block_index], shape=(count,))
 
         def sample_one(component, sample_key):
-            noise = random.normal(sample_key, (mu.shape[-1],), dtype=mu.dtype)
-            return mu[block_index, component] + jnp.einsum(
-                "ij,j->i", factors[block_index, component], noise)
+            return random.multivariate_normal(
+                sample_key, mu[block_index, component],
+                covariances[block_index, component])
 
         return vmap(sample_one)(components, random.split(block_key, count))
 
@@ -124,16 +123,17 @@ def _sample_all_blocks_from_factors(mu, factors, pi_all, count, key):
 
 ```python
 def _sample_all_blocks(mu, S, pi_all, count, key):
-    return _sample_all_blocks_from_factors(
-        mu, _precision_covariance_factors(S), pi_all, count, key)
+    return _sample_all_blocks_from_covariances(
+        mu, _precision_covariances(S), pi_all, count, key)
 
 
 def _sample_iteration_pools(mu, S, pi_all, B, M_inner, key):
-    factors = _precision_covariance_factors(S)
+    covariances = _precision_covariances(S)
     key_B, key_M = random.split(key)
     return (
-        _sample_all_blocks_from_factors(mu, factors, pi_all, B, key_B),
-        _sample_all_blocks_from_factors(mu, factors, pi_all, M_inner, key_M),
+        _sample_all_blocks_from_covariances(mu, covariances, pi_all, B, key_B),
+        _sample_all_blocks_from_covariances(
+            mu, covariances, pi_all, M_inner, key_M),
     )
 ```
 
@@ -151,7 +151,7 @@ samples_B, samples_M = _sample_iteration_pools(
 Run:
 
 ```powershell
-python -m pytest Cartest/eval/test_batched_rne_solver.py -k "factor_cached_sampler or complete_solver_matches_legacy_sampler" -q
+python -m pytest Cartest/eval/test_batched_rne_solver.py -k "covariance_cached_sampler or complete_solver_matches_legacy_sampler" -q
 ```
 
 Expected: both tests PASS with exact equality.
@@ -161,7 +161,7 @@ Expected: both tests PASS with exact equality.
 Run:
 
 ```powershell
-python -m pytest Cartest/eval/test_batched_rne_solver.py Cartest/eval/test_game_solver_modes.py Cartest/eval/test_three_agent_track_cost.py -q
+python -m pytest Cartest/eval/test_batched_rne_solver.py Cartest/eval/test_batched_three_agent_eval.py Cartest/eval/test_game_solver_modes.py Cartest/eval/test_three_agent_track_components.py Cartest/eval/test_three_agent_track_game.py -q
 ```
 
 Expected: all selected tests PASS.
@@ -190,5 +190,5 @@ Stage only the solver, tests, and this plan. Do not stage `Cartest/basis/spline.
 
 ```powershell
 git add -- Cartest/planning/solvers/batched_rne_solver.py Cartest/eval/test_batched_rne_solver.py docs/superpowers/plans/2026-07-18-exact-sampler-factor-cache.md
-git commit -m "perf(cartest): cache exact sampler factors"
+git commit -m "perf(cartest): cache exact sampler covariances"
 ```

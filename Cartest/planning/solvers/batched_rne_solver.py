@@ -52,13 +52,19 @@ def _should_reset_mixture_weights(t, period):
     return jnp.logical_and(t > 0, (t % period) == 0)
 
 
-def _sample_all_blocks(mu, S, pi_all, count, key):
-    """Sample ``count`` points per block from the block GMMs.
+def _precision_covariances(S):
+    """Return ``inv(S + eps*I)`` once per block/component."""
+    eye = jnp.eye(S.shape[-1], dtype=S.dtype) * 1e-7
+    return vmap(vmap(jnp.linalg.inv))(S + eye)
 
-    ``S`` is the precision (information) matrix, so the per-component
-    covariance is ``inv(S + eps*I)``.  This deliberately matches the sampling
-    and PRNG-key consumption in ``MPC_G_MS`` so the Cartest batched solver is
-    comparable to generic ``rne_blocks`` under the same key and warm start.
+
+def _sample_all_blocks_from_covariances(mu, covariances, pi_all, count, key):
+    """Sample block GMMs from cached covariance matrices.
+
+    Component selection and per-sample keys deliberately match the legacy
+    path exactly.  Keeping ``random.multivariate_normal`` also preserves its
+    CUDA Cholesky/einsum lowering bit-for-bit; expanding that affine transform
+    locally introduces last-bit differences for nontrivial precision matrices.
     """
     N_blocks = mu.shape[0]
     K = mu.shape[1]
@@ -67,12 +73,31 @@ def _sample_all_blocks(mu, S, pi_all, count, key):
         comps = random.choice(b_key, K, p=pi_all[b_idx], shape=(count,))
 
         def gen_sample(c_idx, s_key):
-            cov = jnp.linalg.inv(S[b_idx, c_idx] + jnp.eye(S.shape[-1]) * 1e-7)
-            return random.multivariate_normal(s_key, mu[b_idx, c_idx], cov)
+            return random.multivariate_normal(
+                s_key, mu[b_idx, c_idx], covariances[b_idx, c_idx])
 
         return vmap(gen_sample)(comps, random.split(b_key, count))
 
-    return vmap(sample_single_block)(jnp.arange(N_blocks), random.split(key, N_blocks))
+    return vmap(sample_single_block)(
+        jnp.arange(N_blocks), random.split(key, N_blocks))
+
+
+def _sample_all_blocks(mu, S, pi_all, count, key):
+    """Compatibility sampler with the exact legacy sample stream."""
+    return _sample_all_blocks_from_covariances(
+        mu, _precision_covariances(S), pi_all, count, key)
+
+
+def _sample_iteration_pools(mu, S, pi_all, B, M_inner, key):
+    """Sample candidate/background pools sharing one covariance cache."""
+    covariances = _precision_covariances(S)
+    key_B, key_M = random.split(key)
+    return (
+        _sample_all_blocks_from_covariances(
+            mu, covariances, pi_all, B, key_B),
+        _sample_all_blocks_from_covariances(
+            mu, covariances, pi_all, M_inner, key_M),
+    )
 
 
 def make_cartest_batched_rne_blocks_solver(
@@ -118,9 +143,8 @@ def make_cartest_batched_rne_blocks_solver(
             v_t = jnp.where(_should_reset_mixture_weights(t, T_0), v_reset, v_t)
             pi_all = vmap(_v_to_pi)(v_t)  # [N_blocks, K]
 
-            key_B, key_M = random.split(step_key)
-            samples_B = _sample_all_blocks(mu_t, S_t, pi_all, B, key_B)     # [N_blocks, B, D]
-            samples_M = _sample_all_blocks(mu_t, S_t, pi_all, M_inner, key_M)  # [N_blocks, M_inner, D]
+            samples_B, samples_M = _sample_iteration_pools(
+                mu_t, S_t, pi_all, B, M_inner, step_key)
 
             # Shared plan cache: 6 trajectory-eval calls total (3 candidates
             # from samples_B + 3 backgrounds from samples_M), reused across
