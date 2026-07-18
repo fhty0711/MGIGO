@@ -38,6 +38,8 @@ SCENARIO = {
                "collision_lateral_margin": 0.2,
                "v_min": 2.0, "v_max": 35.0, "acc_max": 5.0, "jerk_max": 2.0},
     "behavior": {"ego_target_d": 3.5, "lower_lane_d": 0.0, "upper_lane_d": 3.5,
-                 "speed_factors": (1.15, 1.0, 0.75)},
+                 },
+    "warmstart": {"longitudinal_modes": "target_current_yield",
+                  "yield_delta": 2.0},
     "cost": {"name": COST_NAME, "params": {"omega_s": 1.0, "omega_d": 4.0}},
 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import copy
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -11,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 import jax
 import jax.numpy as jnp
+import pytest
 from unittest.mock import patch
 
 from gmm_igo.solver_builder import build_nash_solver
@@ -257,6 +259,7 @@ if __name__ == "__main__":
 
 from Cartest.execution.execute import FrenetState
 from Cartest.planning.solver_modes import (
+    _warmstart_longitudinal_speeds,
     build_cartest_nash_solver,
     build_multi_agent_context,
     build_multi_agent_warmstart,
@@ -302,6 +305,31 @@ def _states(scenario):
         )
         for agent in scenario["agents"]
     ]
+
+
+def test_three_agent_semantic_warmstart_uses_target_current_yield():
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    states = _states(scenario)
+    speeds = _warmstart_longitudinal_speeds(
+        scenario, states[0], 3, agent_idx=0)
+    assert jnp.allclose(speeds, jnp.array([17.5, 15.0, 13.0]))
+
+
+def test_semantic_warmstart_rejects_non_three_component_layout():
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    with pytest.raises(ValueError, match="requires K=3"):
+        _warmstart_longitudinal_speeds(
+            scenario, _states(scenario)[0], 4, agent_idx=0)
+
+
+def test_legacy_speed_factors_remain_unchanged():
+    scenario = copy.deepcopy(get_scenario("game_2a_basic"))
+    state = _states(scenario)[0]
+    expected = state.s_dot * jnp.asarray(
+        scenario["behavior"]["speed_factors"])
+    actual = _warmstart_longitudinal_speeds(
+        scenario, state, 3, agent_idx=0)
+    assert jnp.allclose(actual, expected)
 
 
 def test_three_agent_track_constraint_layers_are_reduced_and_ordered():

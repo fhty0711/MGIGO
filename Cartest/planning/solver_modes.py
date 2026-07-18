@@ -312,17 +312,37 @@ def build_multi_agent_context(states):
     return ctx
 
 
+def _warmstart_longitudinal_speeds(
+        scenario, state, k_count, *, agent_idx):
+    """Return explicit longitudinal mode speeds for one game agent."""
+    cfg = scenario.get("warmstart", {})
+    if cfg.get("longitudinal_modes") == "target_current_yield":
+        if k_count != 3:
+            raise ValueError("target_current_yield warmstart requires K=3")
+        current = float(state.s_dot)
+        target = float(scenario["agents"][agent_idx]["v_target"])
+        v_min = float(scenario.get("safety", {}).get("v_min", 0.0))
+        yield_delta = float(cfg.get("yield_delta", 2.0))
+        return jnp.asarray([
+            max(current, target),
+            current,
+            max(v_min, current - yield_delta),
+        ], dtype=jnp.float32)
+
+    speed_factors = jnp.asarray(
+        scenario.get("behavior", {}).get(
+            "speed_factors", jnp.linspace(1.15, 0.85, k_count)))
+    if speed_factors.shape[0] != k_count:
+        speed_factors = jnp.linspace(1.15, 0.85, k_count)
+    return float(state.s_dot) * speed_factors
+
+
 def build_multi_agent_warmstart(gen, scenario, states, key):
     """Build block-wise GMM means and precision factors for a game scenario."""
     n_free = gen.n_free
     game = scenario["game"]
     k_count = int(game.get("K", 3))
     n_blocks = len(game["block_layout"])
-    speed_factors = jnp.asarray(
-        scenario.get("behavior", {}).get("speed_factors", (1.15, 1.0, 0.85))
-    )
-    if speed_factors.shape[0] != k_count:
-        speed_factors = jnp.linspace(1.15, 0.85, k_count)
 
     mu = jnp.zeros((n_blocks, k_count, n_free), dtype=jnp.float32)
     greville = gen.greville[2:gen.n_ctrl]
@@ -331,12 +351,14 @@ def build_multi_agent_warmstart(gen, scenario, states, key):
         agent_idx = int(game["block_to_agent"][block_idx])
         state = states[agent_idx]
         is_d_block = label.endswith("_d")
+        mode_speeds = _warmstart_longitudinal_speeds(
+            scenario, state, k_count, agent_idx=agent_idx)
         for comp_idx in range(k_count):
             key, subkey = random.split(key)
             if is_d_block:
                 values = jnp.full((n_free,), float(state.d), dtype=jnp.float32)
             else:
-                speed = float(state.s_dot) * speed_factors[comp_idx]
+                speed = mode_speeds[comp_idx]
                 values = float(state.s) + speed * greville
                 values = values + 0.1 * random.normal(subkey, (n_free,))
             mu = mu.at[block_idx, comp_idx].set(values)
