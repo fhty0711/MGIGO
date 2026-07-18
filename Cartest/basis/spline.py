@@ -26,11 +26,17 @@ OUTPUT_PATH = Path(__file__).with_name("bspline_basis.npz")
 
 
 def build_one_sided_knots(degree: int, n_ctrl: int, total_time: float):
-    """Build knot vector clamped at t=0 only (C0/C1/C2), uniform elsewhere.
+    """Build a one-sided endpoint-clamped knot vector, uniform elsewhere.
 
-    Only the start is clamped — the vehicle MUST start exactly at the
-    current state.  The end needs no clamping because MPC only executes
-    the first step; the rest is just a planning horizon.
+    Repeating the start knot makes the spline interpolate P0 and exposes the
+    usual endpoint derivative formulas.  It does *not* by itself decide which
+    derivatives are fixed.  The runtime trajectory parameterization fixes P0
+    and P1 (C0/C1) and deliberately leaves P2, hence the initial acceleration,
+    free.  C2 clamping was rejected because it made the jerk-limited lateral
+    response too slow for the MPC task.
+
+    The end needs no clamping because MPC only executes the first part of the
+    trajectory; the rest is a planning horizon.
 
     Uniform internal knots make the B-spline convex-hull property tight,
     enabling exact per-control-point constraints.
@@ -38,7 +44,7 @@ def build_one_sided_knots(degree: int, n_ctrl: int, total_time: float):
     dt_knot = total_time / (n_ctrl - degree)
     n_knots = n_ctrl + degree + 1
     knots = np.zeros(n_knots)
-    knots[:degree + 1] = 0.0  # clamped start: C0/C1/C2
+    knots[:degree + 1] = 0.0  # endpoint knot multiplicity; not a C2 constraint
     for i in range(degree + 1, n_knots):
         knots[i] = (i - degree) * dt_knot
     return knots, dt_knot
@@ -93,13 +99,10 @@ def main():
     # |jerk(t)| ≤ max_i { scale_j[i] × |P_{i+3} - 3P_{i+2} + 3P_{i+1} - P_i| }
     #
     # Formula: scale = p!/((p-k)!) / Π(u_{i+p+1-j} - u_{i+1+k-j})
-    # For clamped ends, differences involving only clamped pts have scale=0
-    # (no constraint needed — those pts are fixed).
     p = DEGREE
-    # Only constrain differences among FREE control points (P3..P11).
-    # Clamped P0,P1,P2 already enforce C0/C1/C2 — their diffs are fixed.
-    # Only constrain differences where ALL involved ctrl pts are FREE.
-    # Clamped P0,P1,P2 enforce C0/C1/C2 — mixed diffs skip.
+    # Runtime parameterization: P0/P1 fixed, P2..P9 free.  The scale arrays
+    # below are legacy metadata and are not consumed by the current Cartest
+    # trajectory constraints, which evaluate dB/d2B/d3B directly.
     # Per-point scales: exact max sensitivity from M = derivB @ pinv(Diff).
     # |deriv(t)| ≤ max_i { scale[i] × |diff_i| } — tight, not formula-based.
     def _compute_scales(derivB, diff_order):
@@ -116,10 +119,12 @@ def main():
     scale_v = _compute_scales(dB, 1)
     scale_a = _compute_scales(d2B, 2)
     scale_j = _compute_scales(d3B, 3)
-    # Zero out diffs where ALL pts are clamped (P0,P1,P2)
+    # Historical mask from the retired P0/P1/P2-fixed parameterization.
+    # Retained only for compatibility with existing NPZ metadata; it must not
+    # be interpreted as describing the current C0/C1-only runtime model.
     scale_v[0] = 0.0; scale_v[1] = 0.0
     scale_a[0] = 0.0
-    scale_j[0] = 0.0; scale_j[1] = 0.0; scale_j[2] = 0.0  # d³P_0,1,2 involve clamped
+    scale_j[0] = 0.0; scale_j[1] = 0.0; scale_j[2] = 0.0
 
     np.savez(
         OUTPUT_PATH,
@@ -154,7 +159,7 @@ def main():
     print(f"  d3B     {d3B.shape}")
     print(f"  d4B     {d4B.shape}")
     print(f"  dt_knot = {dt_knot:.4f}s")
-    print(f"  n_free  = {N_CTRL - 3} (P0,P1,P2 clamped)")
+    print(f"  n_free  = {N_CTRL - 2} (P0,P1 fixed; P2..P9 free)")
     print(f"  ✓ Partition of unity, P0 interpolation")
 
     print(f"Saved to {OUTPUT_PATH}")
