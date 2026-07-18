@@ -21,7 +21,7 @@ from Cartest.planning.costs.three_agent_track_components import (
     _plan_s_dot,
     acc_limit_violation_per_t,
     bridged_jerk_cost,
-    collision_lateral_clearance,
+    collision_clearances,
     collision_prefix,
     collision_violation_per_t,
     forward_motion_violation_per_t,
@@ -266,10 +266,7 @@ def _pair_footprint_violation_bm(candidate, background, longitudinal_clearance,
 
 def _collision_aggregate_bm(candidate, backgrounds, scenario, aid):
     """Collision aggregate shaped [B, M_inner] for one acting agent."""
-    safe_gap = float(scenario["safety"].get("safe_gap", 3.0))
-    vehicle_length = float(scenario["safety"].get("vehicle_length", 5.0))
-    longitudinal_clearance = vehicle_length + safe_gap
-    lateral_clearance = collision_lateral_clearance(scenario)
+    longitudinal_clearance, lateral_clearance = collision_clearances(scenario)
     short = collision_prefix(scenario)
     own = candidate[aid]
 

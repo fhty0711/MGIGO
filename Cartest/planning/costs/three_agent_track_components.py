@@ -68,12 +68,18 @@ def collision_prefix(scenario):
     return slice(0, max(1, execute_index + 1))
 
 
-def collision_lateral_clearance(scenario):
-    """Lateral center clearance for the three-agent footprint model."""
-    vehicle_width = float(scenario["safety"].get("vehicle_width", 2.0))
-    safe_gap = float(scenario["safety"].get("safe_gap", 3.0))
-    lane_width = float(scenario["road"].get("lane_width", vehicle_width + safe_gap))
-    return min(vehicle_width + safe_gap, lane_width)
+def collision_clearances(scenario):
+    """Expanded physical-body center clearances for hard collision checks."""
+    safety = scenario["safety"]
+    longitudinal = (
+        float(safety.get("vehicle_length", 5.0))
+        + float(safety.get("collision_longitudinal_margin", 0.5))
+    )
+    lateral = (
+        float(safety.get("vehicle_width", 2.0))
+        + float(safety.get("collision_lateral_margin", 0.2))
+    )
+    return longitudinal, lateral
 
 
 def lane_footprint_bounds(scenario):
@@ -177,10 +183,7 @@ def collision_violation_per_t(plans, scenario, agent_idx):
     short-horizon prefix against ego/rear; rear checks a short-horizon prefix
     against ego plus the full horizon against front.
     """
-    vehicle_length = float(scenario["safety"].get("vehicle_length", 5.0))
-    safe_gap = float(scenario["safety"].get("safe_gap", 3.0))
-    longitudinal_clearance = vehicle_length + safe_gap
-    lateral_clearance = collision_lateral_clearance(scenario)
+    longitudinal_clearance, lateral_clearance = collision_clearances(scenario)
     short = collision_prefix(scenario)
 
     own = plans[agent_idx]

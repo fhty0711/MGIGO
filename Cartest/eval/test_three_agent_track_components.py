@@ -13,6 +13,8 @@ if str(ROOT) not in sys.path:
 
 from Cartest.planning.costs.three_agent_track_components import (
     acc_limit_violation,
+    collision_clearances,
+    collision_violation_per_t,
     forward_motion_violation,
     jerk_limit_violation,
     kinematics_violation,
@@ -22,6 +24,7 @@ from Cartest.planning.costs.three_agent_track_components import (
     rss_cvar_risk,
     role_soft_objective,
 )
+from Cartest.planning.scenarios import get_scenario
 
 
 def _plan(s, d, v=10.0):
@@ -47,6 +50,34 @@ def test_lane_boundary_uses_vehicle_body_tightened_bounds():
     outside = _plan([0.0, 1.0], [-1.0, 5.0])
     assert float(lane_boundary_violation(inside, scenario)) == 0.0
     assert float(lane_boundary_violation(outside, scenario)) > 0.0
+
+
+def test_collision_clearances_use_body_plus_axis_specific_margins():
+    scenario = {"safety": {
+        "vehicle_length": 5.0,
+        "vehicle_width": 2.0,
+        "collision_longitudinal_margin": 0.5,
+        "collision_lateral_margin": 0.2,
+    }}
+    assert collision_clearances(scenario) == (5.5, 2.2)
+
+
+def test_adjacent_lane_centers_do_not_trigger_hard_collision():
+    scenario = get_scenario("three_agent_track")
+    ego = _plan([0.0, 0.0], [0.0, 0.0])
+    front = _plan([0.0, 0.0], [3.5, 3.5])
+    far = _plan([100.0, 100.0], [3.5, 3.5])
+    assert float(jnp.max(collision_violation_per_t(
+        (ego, front, far), scenario, 0))) == 0.0
+
+
+def test_partial_body_overlap_triggers_hard_collision():
+    scenario = get_scenario("three_agent_track")
+    ego = _plan([0.0, 0.0], [0.0, 0.0])
+    overlap = _plan([5.4, 5.4], [2.1, 2.1])
+    far = _plan([100.0, 100.0], [3.5, 3.5])
+    assert float(jnp.max(collision_violation_per_t(
+        (ego, overlap, far), scenario, 0))) > 0.0
 
 
 def test_forward_motion_penalizes_negative_s_dot():

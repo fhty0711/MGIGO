@@ -403,10 +403,11 @@ def test_three_agent_collision_uses_vehicle_footprint_not_point_distance():
     far_s = jnp.full(horizon, 100.0)
     far_d = jnp.full(horizon, 3.5)
 
-    # Center distance is above safe_gap=3.0, so the old point-distance model
-    # would report no collision.  The vehicle bodies overlap longitudinally
-    # and laterally, so the three-agent footprint model must fire.
-    assert jnp.sqrt((front_s[0] - ego_s[0]) ** 2 + (front_d[0] - ego_d[0]) ** 2) > scenario["safety"]["safe_gap"]
+    # Both axis separations are inside the expanded physical-body envelope,
+    # so the rectangular footprint model must fire.
+    longitudinal, lateral = components.collision_clearances(scenario)
+    assert front_s[0] - ego_s[0] < longitudinal
+    assert front_d[0] - ego_d[0] < lateral
 
     scalar_plans = (
         _plan_dict(ego_s, ego_d, vehicle, zeros),

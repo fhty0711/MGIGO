@@ -16,7 +16,6 @@ from Constraintdealer.Constran import Deterministic
 
 from Cartest.planning.costs.game_2a_basic import _eval_agent_plan
 from Cartest.planning.costs.three_agent_track_components import (
-    collision_lateral_clearance,
     collision_prefix,
     forward_motion_violation,
     kinematics_violation,

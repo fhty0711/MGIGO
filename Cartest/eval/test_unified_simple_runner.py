@@ -149,14 +149,18 @@ def test_three_agent_track_uses_full_iteration_budget():
 
 
 def test_three_agent_track_initial_spacing_is_safe():
+    from Cartest.planning.costs.three_agent_track_components import collision_clearances
     from Cartest.planning.scenarios import get_scenario
 
     scenario = get_scenario("three_agent_track")
-    safe_clearance = scenario["safety"]["vehicle_length"] + scenario["safety"]["safe_gap"]
+    longitudinal_clearance, _ = collision_clearances(scenario)
 
     ego, front, rear = scenario["agents"]
-    assert front["s"] - rear["s"] >= safe_clearance
-    assert ego["s"] - rear["s"] >= safe_clearance
+    assert front["s"] - rear["s"] >= longitudinal_clearance
+    assert ego["s"] - rear["s"] >= longitudinal_clearance
+    assert scenario["safety"]["collision_longitudinal_margin"] == 0.5
+    assert scenario["safety"]["collision_lateral_margin"] == 0.2
+    assert "safe_gap" not in scenario["safety"]
 
 if __name__ == "__main__":
     test_game_scenarios_are_registered_with_multi_agent_kind()
