@@ -17,8 +17,12 @@ if str(ROOT) not in sys.path:
 
 from Cartest.eval.nash_game_diagnostics import (
     build_component_mean_diagnostic,
+    make_empirical_best_response_solver,
     mode_residual,
+    run_empirical_best_response,
+    sample_frozen_opponent_blocks,
     select_nash_keyframes,
+    summarize_best_response_restarts,
 )
 from Cartest.core.frenet_traj import FrenetBSplineTrajectory
 from Cartest.execution.execute import FrenetState
@@ -27,6 +31,11 @@ from Cartest.planning.solver_modes import (
     build_cartest_nash_solver,
     build_multi_agent_context,
     build_multi_agent_warmstart,
+)
+from Cartest.planning.costs.three_agent_track_batched import (
+    batched_nested_costs_from_plans,
+    evaluate_joint_plan_batch,
+    expected_cost_for_agent_controls,
 )
 
 
@@ -93,3 +102,127 @@ def test_component_mean_diagnostic_returns_finite_nonnegative_residuals():
     assert best_index.shape == (3,)
     assert jnp.all(jnp.isfinite(residual))
     assert jnp.all(residual >= 0.0)
+
+
+def test_expected_cost_for_agent_controls_matches_explicit_joint_loop():
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
+    states = [
+        FrenetState(
+            s=agent["s"], s_dot=agent["s_dot"],
+            s_ddot=agent.get("s_ddot", 0.0),
+            d=agent["d"], d_dot=agent.get("d_dot", 0.0),
+            d_ddot=agent.get("d_ddot", 0.0),
+            psi=agent.get("psi", 0.0),
+        )
+        for agent in scenario["agents"]
+    ]
+    context = build_multi_agent_context(states)
+    mu, _ = build_multi_agent_warmstart(
+        gen, scenario, states, jax.random.PRNGKey(3))
+    selected = mu[:, 1]
+    own = jnp.stack([
+        selected[0:2],
+        selected[0:2] + 0.02,
+    ])
+    frozen = jnp.stack([
+        selected,
+        selected.at[2].add(0.01),
+        selected.at[4].add(-0.01),
+    ])
+
+    actual = expected_cost_for_agent_controls(
+        gen, own, frozen, context, scenario, agent_idx=0)
+    explicit = []
+    for candidate in own:
+        joint = frozen.at[:, 0:2].set(candidate)
+        plans = evaluate_joint_plan_batch(
+            gen, joint.reshape((joint.shape[0], -1)), context)
+        explicit.append(batched_nested_costs_from_plans(
+            plans, scenario, gen.dt, k_inner=0.1,
+            obj_transform="standard", ctx=context)[:, 0].mean())
+
+    assert jnp.allclose(actual, jnp.stack(explicit), rtol=1e-5, atol=1e-5)
+
+
+def test_frozen_opponent_samples_have_expected_shape_and_mask_own_blocks():
+    block_count, component_count, dim = 6, 3, 4
+    mu = jnp.zeros((block_count, component_count, dim))
+    precision_cholesky = jnp.broadcast_to(
+        jnp.eye(dim), (block_count, component_count, dim, dim))
+    pi = jnp.full((block_count, component_count), 1.0 / component_count)
+
+    samples = sample_frozen_opponent_blocks(
+        mu, precision_cholesky, pi, count=5,
+        key=jax.random.PRNGKey(4), agent_idx=1)
+
+    assert samples.shape == (5, 6, 4)
+    assert jnp.all(jnp.isnan(samples[:, 2:4]))
+    assert jnp.all(jnp.isfinite(samples[:, 0:2]))
+    assert jnp.all(jnp.isfinite(samples[:, 4:6]))
+
+
+def test_best_response_restart_summary_uses_lowest_cost_and_clips_residual():
+    summary = summarize_best_response_restarts(
+        selected_cost=4.0,
+        restart_costs=jnp.array([3.5, 3.8, 4.0]),
+    )
+    assert summary["best_restart"] == 0
+    assert np.isclose(summary["best_cost"], 3.5)
+    assert np.isclose(summary["residual"], 0.5)
+
+    roundoff = summarize_best_response_restarts(
+        selected_cost=4.0,
+        restart_costs=jnp.array([4.0 + 1e-7]),
+    )
+    assert roundoff["residual"] == 0.0
+
+
+def test_empirical_best_response_replays_keys_and_returns_finite_plan():
+    scenario = copy.deepcopy(get_scenario("three_agent_track"))
+    scenario["game"] = dict(
+        scenario["game"], T=1, B=4, B0=2, M_inner=2, T_0=2)
+    gen = FrenetBSplineTrajectory(BASIS, scenario["ref_path"])
+    states = [
+        FrenetState(
+            s=agent["s"], s_dot=agent["s_dot"],
+            s_ddot=agent.get("s_ddot", 0.0),
+            d=agent["d"], d_dot=agent.get("d_dot", 0.0),
+            d_ddot=agent.get("d_ddot", 0.0),
+            psi=agent.get("psi", 0.0),
+        )
+        for agent in scenario["agents"]
+    ]
+    context = build_multi_agent_context(states)
+    mu, precision_cholesky = build_multi_agent_warmstart(
+        gen, scenario, states, jax.random.PRNGKey(5))
+    pi = jnp.full((6, 3), 1.0 / 3.0)
+    selected = mu[:, 1]
+    solver = make_empirical_best_response_solver(gen, scenario, agent_idx=0)
+    kwargs = dict(
+        gen=gen,
+        scenario=scenario,
+        agent_idx=0,
+        point_equilibrium_cost=1.25,
+        mu=mu,
+        precision_cholesky=precision_cholesky,
+        pi=pi,
+        selected_blocks=selected,
+        context=context,
+        background_key=jax.random.PRNGKey(6),
+        restart_keys=[jax.random.PRNGKey(7), jax.random.PRNGKey(8)],
+        solver=solver,
+    )
+
+    first = run_empirical_best_response(**kwargs)
+    replay = run_empirical_best_response(**kwargs)
+
+    assert np.asarray(first["best_controls"]).shape == (2, gen.n_free)
+    assert np.all(np.isfinite(first["best_controls"]))
+    assert np.all(np.isfinite(first["best_response_xy"]))
+    assert np.allclose(first["restart_costs"], replay["restart_costs"])
+    assert np.isclose(
+        first["equilibrium_expected_cost"],
+        replay["equilibrium_expected_cost"])
+    assert first["epsilon_br"] >= 0.0
+    assert first["method"] == "empirical_distributional_best_response_2_restart"

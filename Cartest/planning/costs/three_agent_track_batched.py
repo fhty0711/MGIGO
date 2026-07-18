@@ -87,6 +87,48 @@ def evaluate_joint_plan_batch(gen, joint_batch, ctx, agent_count=3):
     )
 
 
+def expected_cost_for_agent_controls(
+        gen, own_controls, frozen_joint_controls, ctx, scenario, agent_idx,
+        k_inner=0.1, obj_transform="standard"):
+    """Expected nested cost for unilateral controls against frozen opponents.
+
+    ``own_controls`` is ``[B, 2, D]`` and ``frozen_joint_controls`` is
+    ``[M, 6, D]``.  The acting agent's two blocks in every frozen joint sample
+    are replaced before trajectory evaluation, so those source entries may be
+    masked with NaNs to make accidental use visible.
+    """
+    own_controls = jnp.asarray(own_controls)
+    frozen_joint_controls = jnp.asarray(frozen_joint_controls)
+    candidate_count = own_controls.shape[0]
+    opponent_count = frozen_joint_controls.shape[0]
+    first_block = 2 * agent_idx
+
+    joint = jnp.broadcast_to(
+        frozen_joint_controls[None],
+        (candidate_count,) + frozen_joint_controls.shape,
+    )
+    replacement = jnp.broadcast_to(
+        own_controls[:, None],
+        (candidate_count, opponent_count) + own_controls.shape[1:],
+    )
+    joint = joint.at[:, :, first_block:first_block + 2].set(replacement)
+    plans = evaluate_joint_plan_batch(
+        gen,
+        joint.reshape((candidate_count * opponent_count, -1)),
+        ctx,
+        agent_count=3,
+    )
+    costs = batched_nested_costs_from_plans(
+        plans,
+        scenario,
+        gen.dt,
+        k_inner=k_inner,
+        obj_transform=obj_transform,
+        ctx=ctx,
+    )[:, agent_idx]
+    return costs.reshape((candidate_count, opponent_count)).mean(axis=1)
+
+
 def batched_agent_costs_from_plans(plans, scenario, dt, ctx=None):
     """Return scalar objective costs shaped [batch, 3] using shared components.
 
